@@ -1,0 +1,138 @@
+# Mentriq360 Campus ERP
+
+Mentriq360 is a role-based campus ERP built from the supplied ER/user-flow diagram. It covers authentication, admin setup, student records, teacher attendance, fee assignment, payment entry, reporting, audit logs, and student visibility.
+
+## Stack
+
+- `Next.js 16 + TypeScript + Tailwind CSS` for the responsive web app
+- `Django 5.2 + Django REST Framework` for the API
+- `SimpleJWT` for access and refresh tokens
+- `PostgreSQL` for production data
+- `SQLite` for quick local execution
+- `Redis` for shared cache, rate limits, and future queues/notifications
+
+## Implemented Modules
+
+- Authentication: JWT login, refresh, current user, role-aware dashboard routing
+- User management: admin-managed users for admins, teachers, finance teams, and students
+- Academic setup: campuses, academic sessions, class sections, class teachers
+- Student module: admission records, section assignment, status tracking
+- Attendance: teacher section roster, bulk attendance upsert, and student read-only reports
+- Fees and payments: fee assignment, payment capture, automatic paid/partial/pending/overdue status refresh
+- Reports: dashboard summary, attendance by section, fee status, recent payments
+- Notifications and support: admin announcements, role-visible alerts, and user support tickets for super admins
+- Campus360 modules: a role-aware 20-module suite view covering admissions, SIS, staff, fees, exams, certificates, homework, timetable, library, transport, hostel, inventory, communication, online learning, analytics, director dashboard, and security
+- Security audit: login and write-action audit events
+- Production controls: installable web app manifest, session idle expiry, request timeouts, global error handling, Redis-backed throttling support, and scoped hardware attendance throttles
+
+## Local Run
+
+PowerShell from the repository root:
+
+```powershell
+Copy-Item .env.example .env
+
+python -m venv .backend-venv
+.\.backend-venv\Scripts\python.exe -m pip install -r backend\requirements.txt
+
+$env:DJANGO_USE_SQLITE='True'
+Set-Location backend
+..\.backend-venv\Scripts\python.exe manage.py migrate
+..\.backend-venv\Scripts\python.exe manage.py seed_demo
+..\.backend-venv\Scripts\python.exe manage.py runserver 0.0.0.0:8000
+```
+
+In another terminal:
+
+```powershell
+Set-Location web
+pnpm install
+pnpm dev
+```
+
+Open:
+
+- Web app: `http://localhost:3000`
+- API health: `http://localhost:8000/api/v1/health/`
+- API docs: `http://localhost:8000/api/docs/`
+- Django admin: `http://localhost:8000/admin/`
+
+## Demo Accounts
+
+After `seed_demo`, all demo users use password `Mentriq@123`. The same demo-only list is written to `docs/demo-credentials.txt` each time the seed command runs.
+
+- `super.admin` - full access to all campuses and support issues
+- `it.admin` - Mentriq360 Main Campus IT admin
+- `north.admin` - Mentriq360 North Campus IT admin
+- `academic.admin` - academic records and exam workflows
+- `finance.admin` - fees and payment workflows
+- `teacher.meera` - assigned class access
+- `teacher.dev` - North Campus assigned class access
+- `parent.rohan` - read-only family portal for linked learners
+- `student.anaya` - own profile only
+
+## Verification
+
+Backend checks:
+
+```powershell
+Set-Location backend
+$env:DJANGO_USE_SQLITE='True'
+..\.backend-venv\Scripts\python.exe manage.py check
+..\.backend-venv\Scripts\python.exe manage.py test
+```
+
+Frontend checks:
+
+```powershell
+Set-Location web
+pnpm lint
+pnpm build
+```
+
+## Capacitor Android App
+
+Capacitor is installed in the `web` workspace with an Android project at `web/android`.
+
+```powershell
+Set-Location web
+pnpm build:mobile
+pnpm cap:open:android
+```
+
+`pnpm build:mobile` runs a static Next export into `web/out` and syncs it into Android. Android Studio is required to build and sign APK/AAB packages.
+
+For command-line Android builds on Windows, use Android Studio's bundled JDK and the installed SDK:
+
+```powershell
+$env:JAVA_HOME='C:\Program Files\Android\Android Studio\jbr'
+$env:ANDROID_HOME="$env:LOCALAPPDATA\Android\Sdk"
+$env:ANDROID_SDK_ROOT=$env:ANDROID_HOME
+$env:PATH="$env:JAVA_HOME\bin;$env:ANDROID_HOME\platform-tools;$env:ANDROID_HOME\cmdline-tools\latest\bin;$env:ANDROID_HOME\emulator;$env:PATH"
+
+Set-Location web\android
+.\gradlew.bat assembleDebug
+```
+
+The debug APK is written to `web/android/app/build/outputs/apk/debug/app-debug.apk`.
+
+## Docker Deployment Preview
+
+Docker Desktop is supported through the included Compose file:
+
+```powershell
+Copy-Item .env.example .env
+docker compose up --build
+```
+
+The Compose stack starts PostgreSQL, Redis, the Django API, and the web app.
+
+## Documentation
+
+- [Architecture](docs/architecture.md)
+- [Runbook](docs/runbook.md)
+- [Module and phase plan](docs/module-plan.md)
+- [API reference](docs/api.md)
+- [Security baseline](docs/security.md)
+- [Production readiness](docs/production-readiness.md)
+- [Campus360 access matrix](docs/campus360-access-matrix.md)
