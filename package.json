@@ -1,0 +1,11 @@
+{
+  "name": "mentriq360",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "pnpm@10.32.1",
+  "scripts": {
+    "web:dev": "pnpm --dir web dev",
+    "web:build": "pnpm --dir web build",
+    "web:lint": "pnpm --dir web lint"
+  }
+}
