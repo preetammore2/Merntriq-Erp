@@ -7,7 +7,8 @@ const BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000/api/
 const AUTH_BASE = process.env.NEXT_PUBLIC_API_BASE_URL
   ? process.env.NEXT_PUBLIC_API_BASE_URL.replace("/api/v1", "/api/v1/auth")
   : "http://localhost:8000/api/v1/auth";
-const REQUEST_TIMEOUT_MS = Number(process.env.NEXT_PUBLIC_API_TIMEOUT_MS ?? "20000");
+const configuredTimeout = Number(process.env.NEXT_PUBLIC_API_TIMEOUT_MS ?? "60000");
+const REQUEST_TIMEOUT_MS = Number.isFinite(configuredTimeout) ? Math.max(configuredTimeout, 60000) : 60000;
 export const SESSION_EXPIRED_EVENT = "mentriq360-session-expired";
 
 // ─── Token helpers ────────────────────────────────────────────────────────────
