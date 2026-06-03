@@ -93,7 +93,7 @@ Set-Location backend
 ..\.backend-venv\Scripts\python.exe manage.py migrate_campus_databases
 ```
 
-Users enter the configured campus code on login to route the session to that campus database.
+The login form uses the default database and does not ask users for a campus code. Campus database routing is handled by the stored tenant campus context and the `X-Campus-Code` API header.
 
 ## 6. Verification
 
@@ -122,6 +122,7 @@ pnpm build
 - Use PostgreSQL, not SQLite.
 - Set production `DJANGO_ALLOWED_HOSTS`.
 - Set production `DJANGO_CORS_ALLOWED_ORIGINS`.
+- Set frontend `NEXT_PUBLIC_API_BASE_URL` to the deployed Django API URL, for example `https://your-backend-domain.vercel.app/api/v1`.
 - Serve the frontend over HTTPS.
 - Use `config.settings.production`.
 - Run `python manage.py migrate`.

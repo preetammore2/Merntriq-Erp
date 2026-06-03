@@ -3,7 +3,8 @@
  * All backend calls go through this module so token management is centralised.
  */
 
-const CONFIGURED_API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000/api/v1";
+const DEFAULT_API_BASE = "http://localhost:8000/api/v1";
+const CONFIGURED_API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL;
 const configuredTimeout = Number(process.env.NEXT_PUBLIC_API_TIMEOUT_MS ?? "60000");
 const REQUEST_TIMEOUT_MS = Number.isFinite(configuredTimeout) ? Math.max(configuredTimeout, 60000) : 60000;
 export const SESSION_EXPIRED_EVENT = "mentriq360-session-expired";
@@ -15,12 +16,16 @@ function trimTrailingSlash(value: string) {
 }
 
 function getApiBase() {
-  const configuredBase = trimTrailingSlash(CONFIGURED_API_BASE);
+  const configuredBase = trimTrailingSlash(CONFIGURED_API_BASE || DEFAULT_API_BASE);
   if (typeof window === "undefined") return configuredBase;
 
   try {
     const apiUrl = new URL(configuredBase);
     const pageHost = window.location.hostname;
+
+    if (!CONFIGURED_API_BASE && window.location.protocol === "https:" && LOOPBACK_HOSTS.has(apiUrl.hostname)) {
+      return "/api/v1";
+    }
 
     if (pageHost && !LOOPBACK_HOSTS.has(pageHost) && LOOPBACK_HOSTS.has(apiUrl.hostname)) {
       apiUrl.hostname = pageHost;
@@ -34,6 +39,10 @@ function getApiBase() {
 
 function getAuthBase() {
   return `${getApiBase()}/auth`;
+}
+
+function isResolvedApiPath(path: string) {
+  return path.startsWith("http://") || path.startsWith("https://") || path.startsWith("/api/");
 }
 
 // ─── Token helpers ────────────────────────────────────────────────────────────
@@ -110,7 +119,7 @@ async function apiFetch<T>(
   const campusCode = getTenantCampusCode();
   if (campusCode && !headers["X-Campus-Code"]) headers["X-Campus-Code"] = campusCode;
 
-  const url = path.startsWith("http") ? path : `${getApiBase()}${path}`;
+  const url = isResolvedApiPath(path) ? path : `${getApiBase()}${path}`;
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
   let res: Response;
@@ -155,6 +164,12 @@ async function apiFetch<T>(
 
   // 204 No Content
   if (res.status === 204) return undefined as T;
+
+  const contentType = res.headers.get("content-type") ?? "";
+  if (!contentType.includes("application/json")) {
+    throw new ApiError(res.status, "The API returned an invalid response. Check the deployed API URL and backend server.");
+  }
+
   return res.json() as Promise<T>;
 }
 

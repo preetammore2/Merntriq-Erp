@@ -86,7 +86,13 @@ Set-Location backend
 ..\.backend-venv\Scripts\python.exe manage.py migrate_campus_databases
 ```
 
-The web login has an optional Campus code field. Leave it blank for the default database, or enter a configured campus code to use that campus database.
+Campus database routing is controlled by the stored tenant campus context and the `X-Campus-Code` API header. The login form uses the default database and no longer asks users for a campus code.
+
+For production web deployments, set `NEXT_PUBLIC_API_BASE_URL` to the deployed Django API URL, for example:
+
+```dotenv
+NEXT_PUBLIC_API_BASE_URL=https://your-backend-domain.vercel.app/api/v1
+```
 
 ## Verification
 

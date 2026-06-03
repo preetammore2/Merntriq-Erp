@@ -45,11 +45,12 @@ const AuthCtx = createContext<AuthState | null>(null);
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(false);
 
   // Bootstrap from stored token on page load
   useEffect(() => {
-    if (!hasTokens()) { setLoading(false); return; }
+    if (!hasTokens()) return;
+    setLoading(true);
     if (isIdleExpired()) {
       clearTokens();
       localStorage.removeItem(LAST_ACTIVITY_KEY);

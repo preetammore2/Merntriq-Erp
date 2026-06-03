@@ -217,7 +217,7 @@ export function AppShell() {
   const campusName = user?.role === "super_admin" ? "All campuses" : primaryCampus?.name ?? "Campus not assigned";
   const accessMode = user?.role === "student" || user?.role === "parent" ? "Read-only" : "Operational";
 
-  if (loading) return null;
+  if (loading) return <LoginPage />;
 
   if (!user) return <LoginPage />;
 
