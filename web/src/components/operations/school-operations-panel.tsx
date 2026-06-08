@@ -68,7 +68,7 @@ function statusVariant(active: boolean) {
 function roleName(role?: UserRole) {
   if (!role) return "";
   if (role === "super_admin") return "Super Admin";
-  if (role === "admin") return "School Admin";
+  if (role === "school_admin") return "School Admin";
   if (role === "account") return "Account";
   return role[0].toUpperCase() + role.slice(1);
 }
@@ -155,7 +155,7 @@ function SectionLabel({ sections, id }: { sections: ClassSection[]; id?: number 
 
 export function SchoolOperationsPanel() {
   const { user } = useAuth();
-  const canManage = user?.role === "super_admin" || user?.role === "admin";
+  const canManage = user?.role === "super_admin" || user?.role === "school_admin";
   const [activeView, setActiveView] = useState<OperationsView>("staff");
   const [campuses, setCampuses] = useState<Campus[]>([]);
   const [sections, setSections] = useState<ClassSection[]>([]);
@@ -231,7 +231,7 @@ export function SchoolOperationsPanel() {
 
   const teachers = useMemo(() => users.filter((item) => item.role === "teacher"), [users]);
   const staffUsers = useMemo(
-    () => users.filter((item) => item.role === "teacher" || item.role === "admin" || item.role === "super_admin"),
+    () => users.filter((item) => item.role === "teacher" || item.role === "school_admin" || item.role === "super_admin"),
     [users],
   );
 

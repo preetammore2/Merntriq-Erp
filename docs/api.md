@@ -2,6 +2,8 @@
 
 Base URL: `/api/v1/`
 
+For final client handover notes, OpenAPI URLs, pagination behavior, protected downloads, and payment webhook expectations, see [API Documentation Handover](api-documentation.md).
+
 ## Authentication
 
 - `POST /auth/token/` - login and receive access/refresh tokens
@@ -21,14 +23,10 @@ For campus-isolated databases, send `X-Campus-Code: {campus_code}` with login an
 - `GET/POST /sections/`
 - `GET/PATCH/DELETE /sections/{id}/`
 
-## Students and Guardians
+## Students
 
 - `GET/POST /students/`
 - `GET/PATCH/DELETE /students/{id}/`
-- `GET/POST /student-guardians/`
-- `GET/PATCH/DELETE /student-guardians/{id}/`
-
-Parents use the same authenticated API and are scoped through `StudentGuardian` links to their linked student records.
 
 Useful filters:
 
@@ -98,7 +96,60 @@ Useful filters:
 - `GET/POST /hostel-allocations/`
 - `GET/PATCH/DELETE /hostel-allocations/{id}/`
 
-Admins manage operational records. Teachers, students, and parents receive read-only scoped views where the record is connected to their class or linked student.
+School admins manage operational records. Teachers and students receive scoped views where the record is connected to their class or linked student.
+
+## Commercial Ecosystem
+
+Admissions:
+
+- `GET/POST /admission-form-templates/`
+- `GET/POST /admission-applications/`
+- `POST /admission-applications/{id}/transition/`
+- `POST /admission-applications/{id}/mark-payment/`
+- `POST /admission-applications/{id}/admit/`
+- `GET /admission-applications/dashboard/`
+- `GET/POST /public/admissions/{schoolCode}/`
+- `GET /public/admissions/track/{trackingCode}/`
+
+Transport, library, and inventory:
+
+- `GET/POST /transport-drivers/`
+- `GET/POST /transport-vehicle-attendance/`
+- `GET/POST /transport-trip-logs/`
+- `GET/POST /digital-library-resources/`
+- `GET /digital-library-resources/{id}/download/`
+- `GET/POST /library-book-requests/`
+- `POST /library-book-requests/{id}/decide/`
+- `GET/POST /inventory-assets/`
+- `GET/POST /asset-maintenance-logs/`
+
+Website, mobile, marketplace, and compliance:
+
+- `GET/POST /school-website-contents/`
+- `GET /public/schools/{schoolCode}/website/`
+- `GET/POST /push-devices/`
+- `GET/POST /push-notifications/`
+- `POST /push-notifications/{id}/mark-sent/`
+- `GET /mobile/bootstrap/`
+- `GET/POST /marketplace-plugins/`
+- `GET/POST /school-plugin-configs/`
+- `GET/POST /accounting-ledger-entries/`
+- `GET /accounting-ledger-entries/gst-report/`
+- `GET/POST /report-definitions/`
+- `GET /report-definitions/{id}/run/`
+- `GET /report-definitions/{id}/export/?file_format=csv`
+
+Security and launch audit:
+
+- `GET/POST /security-policies/`
+- `GET /device-login-sessions/`
+- `POST /device-login-sessions/{id}/force-logout/`
+- `GET /security-events/`
+- `POST /security-events/{id}/resolve/`
+- `GET/POST /production-audit-runs/`
+- `POST /production-audit-runs/run-now/`
+- `GET /production-audit-runs/{id}/report/`
+- `GET /enterprise/ecosystem/`
 
 ## Reports and Audit
 
@@ -106,7 +157,7 @@ Admins manage operational records. Teachers, students, and parents receive read-
 - `GET /audit-events/`
 - `GET /audit-events/{id}/`
 
-Audit events are admin-only. Parent users receive `403` for audit endpoints and read only records linked through guardian relationships.
+Audit events are admin-only. Students receive `403` for audit endpoints and read only their linked student records.
 
 ## Notifications and Support
 

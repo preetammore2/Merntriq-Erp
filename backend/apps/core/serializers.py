@@ -1,46 +1,96 @@
-from rest_framework import serializers
-from django.db.models import Sum
+import secrets
+from decimal import Decimal
 
-from apps.accounts.models import UserRole
+from django.db.models import Q, Sum
+from django.conf import settings
+from django.db import connections
+from rest_framework import serializers
+
+from apps.accounts.models import User, UserRole
 
 from .attendance_rules import ensure_attendance_date_is_editable
 from .models import (
     AcademicSession,
+    AcademicEvent,
+    AccountingLedgerEntry,
     AdmitCard,
     AILog,
+    AdmissionApplication,
+    AdmissionDocument,
+    AdmissionFormTemplate,
+    AssetMaintenanceLog,
+    AssignmentSubmission,
     AssignedWork,
     ApprovalRequest,
     Announcement,
     AttendanceDevice,
     AttendanceRecord,
     AuditEvent,
+    BackupJob,
+    BackupPolicy,
     Campus,
     CampusMembership,
     ClassSection,
+    CommunicationSetting,
+    DeviceSyncLog,
     Document,
+    DocumentAccessLog,
+    DeviceLoginSession,
+    DigitalLibraryResource,
+    EnterpriseUsageMetric,
+    InventoryAsset,
     FeeAssignment,
+    FeeStructure,
+    FinanceEvent,
     HostelAllocation,
     HostelRoom,
     LibraryBook,
+    LibraryBookRequest,
     LibraryLoan,
     LearningResource,
+    MarketplacePlugin,
     MessageTemplate,
     OutboundMessage,
     Payment,
+    PaymentGatewayConfig,
     PaymentTransaction,
     PlatformSetting,
+    ProductionAuditRun,
+    PushNotificationDevice,
+    PushNotificationLog,
+    QueueJob,
+    ReportDefinition,
     ResultRecord,
+    SaaSPlan,
     SalaryRecord,
+    SalarySetup,
+    SchoolPluginConfig,
+    SchoolSubscription,
+    SecureAPIToken,
+    SecurityEvent,
+    SecurityPolicy,
+    SubscriptionInvoice,
+    SubscriptionPayment,
+    SystemHealthSnapshot,
+    ExamSchedule,
+    ExamSubjectSetup,
+    ExamType,
     StaffAttendanceRecord,
     StaffProfile,
     Student,
-    StudentGuardian,
     StudentTransportAssignment,
+    Subject,
     SupportTicket,
     TeacherSubjectAllocation,
     TimetableSlot,
     TransportRoute,
+    TransportDriver,
+    TransportTripLog,
     TransportVehicle,
+    TransportVehicleAttendance,
+    UserActivityLog,
+    WhiteLabelConfig,
+    SchoolWebsiteContent,
 )
 
 
@@ -52,8 +102,13 @@ class CampusSerializer(serializers.ModelSerializer):
             "name",
             "code",
             "address",
+            "city",
+            "state",
+            "pincode",
             "contact_email",
             "contact_phone",
+            "website",
+            "principal_name",
             "logo_url",
             "logo_alt_text",
             "banner_url",
@@ -98,6 +153,152 @@ class CampusSerializer(serializers.ModelSerializer):
         return cleaned
 
 
+def school_connection_status(campus: Campus) -> dict:
+    alias = (campus.database_alias or "").strip()
+    if not alias:
+        return {
+            "mode": "single_database",
+            "alias": "default",
+            "databaseName": str(campus.database_name or settings.DATABASES["default"].get("NAME", "")),
+            "configured": True,
+            "connected": True,
+            "detail": "Using default database with strict schoolId filtering.",
+        }
+
+    if alias not in settings.DATABASES:
+        return {
+            "mode": "separate_database",
+            "alias": alias,
+            "databaseName": campus.database_name,
+            "configured": False,
+            "connected": False,
+            "detail": "Database alias is not configured.",
+        }
+
+    try:
+        connections[alias].ensure_connection()
+    except Exception as exc:
+        return {
+            "mode": "separate_database",
+            "alias": alias,
+            "databaseName": str(campus.database_name or settings.DATABASES[alias].get("NAME", "")),
+            "configured": True,
+            "connected": False,
+            "detail": str(exc),
+        }
+
+    return {
+        "mode": "separate_database",
+        "alias": alias,
+        "databaseName": str(campus.database_name or settings.DATABASES[alias].get("NAME", "")),
+        "configured": True,
+        "connected": True,
+        "detail": "Database connection is available.",
+    }
+
+
+class SchoolSerializer(serializers.ModelSerializer):
+    schoolId = serializers.IntegerField(source="id", read_only=True)
+    schoolCode = serializers.CharField(source="code", required=False)
+    schoolName = serializers.CharField(source="name")
+    logo = serializers.CharField(source="logo_url", required=False, allow_blank=True)
+    bannerImage = serializers.CharField(source="banner_url", required=False, allow_blank=True)
+    contactNumber = serializers.CharField(source="contact_phone", required=False, allow_blank=True)
+    email = serializers.EmailField(source="contact_email", required=False, allow_blank=True)
+    principalName = serializers.CharField(source="principal_name", required=False, allow_blank=True)
+    subscriptionStatus = serializers.CharField(source="subscription_status", required=False, allow_blank=True)
+    databaseName = serializers.CharField(source="database_name", required=False, allow_blank=True)
+    tenantId = serializers.CharField(source="database_alias", required=False, allow_blank=True)
+    createdAt = serializers.DateTimeField(source="created_at", read_only=True)
+    updatedAt = serializers.DateTimeField(source="updated_at", read_only=True)
+    totalStudents = serializers.SerializerMethodField()
+    totalTeachers = serializers.SerializerMethodField()
+    totalStaff = serializers.SerializerMethodField()
+    schoolAdmins = serializers.SerializerMethodField()
+    databaseConnectionStatus = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Campus
+        fields = (
+            "schoolId",
+            "schoolCode",
+            "schoolName",
+            "logo",
+            "bannerImage",
+            "address",
+            "city",
+            "state",
+            "pincode",
+            "contactNumber",
+            "email",
+            "website",
+            "principalName",
+            "status",
+            "subscriptionStatus",
+            "databaseName",
+            "tenantId",
+            "createdAt",
+            "updatedAt",
+            "totalStudents",
+            "totalTeachers",
+            "totalStaff",
+            "schoolAdmins",
+            "databaseConnectionStatus",
+        )
+
+    def get_totalStudents(self, obj: Campus) -> int:
+        return obj.students.count()
+
+    def validate_logo(self, value: str) -> str:
+        cleaned = (value or "").strip()
+        if not cleaned:
+            return ""
+        allowed_prefixes = ("https://", "http://", "data:image/png;", "data:image/jpeg;", "data:image/webp;", "data:image/svg+xml;")
+        if not cleaned.startswith(allowed_prefixes):
+            raise serializers.ValidationError("Use an http(s) URL or an uploaded PNG, JPG, WEBP, or SVG logo.")
+        if len(cleaned) > 750_000:
+            raise serializers.ValidationError("Logo is too large. Use an image below 500 KB.")
+        return cleaned
+
+    def validate_bannerImage(self, value: str) -> str:
+        cleaned = (value or "").strip()
+        if not cleaned:
+            return ""
+        allowed_prefixes = ("https://", "http://", "data:image/png;", "data:image/jpeg;", "data:image/webp;")
+        if not cleaned.startswith(allowed_prefixes):
+            raise serializers.ValidationError("Use an http(s) URL or an uploaded PNG, JPG, or WEBP banner.")
+        if len(cleaned) > 1_500_000:
+            raise serializers.ValidationError("Banner is too large. Use an image below 1 MB.")
+        return cleaned
+
+    def scoped_users(self, obj: Campus):
+        return User.objects.filter(Q(school=obj) | Q(campus_memberships__campus=obj)).distinct()
+
+    def get_totalTeachers(self, obj: Campus) -> int:
+        return self.scoped_users(obj).filter(role=UserRole.TEACHER).count()
+
+    def get_totalStaff(self, obj: Campus) -> int:
+        return self.scoped_users(obj).exclude(role__in=[UserRole.STUDENT, UserRole.SUPER_ADMIN]).count()
+
+    def get_schoolAdmins(self, obj: Campus) -> int:
+        return self.scoped_users(obj).filter(role=UserRole.SCHOOL_ADMIN).count()
+
+    def get_databaseConnectionStatus(self, obj: Campus) -> dict:
+        request = self.context.get("request")
+        if request and getattr(request.user, "role", None) != UserRole.SUPER_ADMIN:
+            return {}
+        return school_connection_status(obj)
+
+
+class SchoolProfileSerializer(SchoolSerializer):
+    class Meta(SchoolSerializer.Meta):
+        fields = tuple(
+            field
+            for field in SchoolSerializer.Meta.fields
+            if field not in {"databaseName", "tenantId", "databaseConnectionStatus"}
+        )
+
+
 class CampusMembershipSerializer(serializers.ModelSerializer):
     campus_name = serializers.CharField(source="campus.name", read_only=True)
     user_name = serializers.SerializerMethodField()
@@ -123,6 +324,17 @@ class CampusMembershipSerializer(serializers.ModelSerializer):
 
     def get_user_name(self, obj: CampusMembership) -> str:
         return obj.user.get_full_name() or obj.user.username
+
+    def validate(self, attrs):
+        campus = attrs.get("campus", getattr(self.instance, "campus", None))
+        user = attrs.get("user", getattr(self.instance, "user", None))
+        if user and user.role == UserRole.SUPER_ADMIN:
+            raise serializers.ValidationError({"user": "Super Admin accounts are global and cannot be assigned to a school."})
+        if user and campus:
+            existing = CampusMembership.objects.filter(user=user).exclude(pk=getattr(self.instance, "pk", None))
+            if existing.exclude(campus=campus).exists() or (user.school_id and user.school_id != campus.id):
+                raise serializers.ValidationError({"campus": "Every user can belong to only one school."})
+        return attrs
 
 
 class AttendanceDeviceSerializer(serializers.ModelSerializer):
@@ -288,6 +500,35 @@ class TeacherSubjectAllocationSerializer(serializers.ModelSerializer):
         return attrs
 
 
+class SubjectSerializer(serializers.ModelSerializer):
+    campus_name = serializers.CharField(source="campus.name", read_only=True)
+
+    class Meta:
+        model = Subject
+        fields = (
+            "id",
+            "campus",
+            "campus_name",
+            "name",
+            "code",
+            "grade_name",
+            "description",
+            "is_active",
+            "created_at",
+            "updated_at",
+        )
+        read_only_fields = ("created_at", "updated_at")
+
+    def validate_name(self, value: str) -> str:
+        name = (value or "").strip()
+        if not name:
+            raise serializers.ValidationError("Subject name is required.")
+        return name
+
+    def validate_code(self, value: str) -> str:
+        return (value or "").strip().upper()
+
+
 class StudentSerializer(serializers.ModelSerializer):
     full_name = serializers.ReadOnlyField()
     campus_name = serializers.CharField(source="campus.name", read_only=True)
@@ -309,6 +550,7 @@ class StudentSerializer(serializers.ModelSerializer):
             "last_name",
             "full_name",
             "date_of_birth",
+            "photo_url",
             "father_name",
             "mother_name",
             "contact_email",
@@ -340,25 +582,6 @@ class StudentSerializer(serializers.ModelSerializer):
         if user and user.role != UserRole.STUDENT:
             raise serializers.ValidationError({"user": "Linked login user must have the student role."})
         return attrs
-
-
-class StudentGuardianSerializer(serializers.ModelSerializer):
-    student_name = serializers.CharField(source="student.full_name", read_only=True)
-    guardian_name = serializers.CharField(source="guardian.get_full_name", read_only=True)
-
-    class Meta:
-        model = StudentGuardian
-        fields = (
-            "id",
-            "student",
-            "student_name",
-            "guardian",
-            "guardian_name",
-            "relationship",
-            "created_at",
-            "updated_at",
-        )
-        read_only_fields = ("created_at", "updated_at")
 
 
 class AttendanceRecordSerializer(serializers.ModelSerializer):
@@ -493,6 +716,7 @@ class StaffProfileSerializer(serializers.ModelSerializer):
             "employee_code",
             "designation",
             "department",
+            "photo_url",
             "employment_type",
             "joining_date",
             "qualification",
@@ -570,6 +794,150 @@ class TimetableSlotSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError({"effective_to": "End date must be on or after the effective from date."})
         if not subject:
             raise serializers.ValidationError({"subject": "Subject is required."})
+        return attrs
+
+
+class ExamTypeSerializer(serializers.ModelSerializer):
+    campus_name = serializers.CharField(source="campus.name", read_only=True)
+
+    class Meta:
+        model = ExamType
+        fields = (
+            "id",
+            "campus",
+            "campus_name",
+            "name",
+            "description",
+            "is_active",
+            "created_at",
+            "updated_at",
+        )
+        read_only_fields = ("created_at", "updated_at")
+
+    def validate_name(self, value: str) -> str:
+        name = (value or "").strip()
+        if not name:
+            raise serializers.ValidationError("Exam type name is required.")
+        return name
+
+
+class ExamSubjectSetupSerializer(serializers.ModelSerializer):
+    campus_name = serializers.CharField(source="campus.name", read_only=True)
+    exam_type_name = serializers.CharField(source="exam_type.name", read_only=True)
+    section_label = serializers.SerializerMethodField()
+    subject_name = serializers.CharField(source="subject.name", read_only=True)
+
+    class Meta:
+        model = ExamSubjectSetup
+        fields = (
+            "id",
+            "campus",
+            "campus_name",
+            "exam_type",
+            "exam_type_name",
+            "section",
+            "section_label",
+            "subject",
+            "subject_name",
+            "max_marks",
+            "pass_marks",
+            "weightage",
+            "is_active",
+            "created_at",
+            "updated_at",
+        )
+        read_only_fields = ("created_at", "updated_at")
+
+    def get_section_label(self, obj: ExamSubjectSetup) -> str:
+        return f"{obj.section.grade_name} - {obj.section.section_name}"
+
+    def validate(self, attrs):
+        campus = attrs.get("campus", getattr(self.instance, "campus", None))
+        exam_type = attrs.get("exam_type", getattr(self.instance, "exam_type", None))
+        section = attrs.get("section", getattr(self.instance, "section", None))
+        subject = attrs.get("subject", getattr(self.instance, "subject", None))
+        max_marks = attrs.get("max_marks", getattr(self.instance, "max_marks", None))
+        pass_marks = attrs.get("pass_marks", getattr(self.instance, "pass_marks", None))
+        weightage = attrs.get("weightage", getattr(self.instance, "weightage", None))
+        if campus and exam_type and exam_type.campus_id != campus.id:
+            raise serializers.ValidationError({"exam_type": "Exam type must belong to the selected campus."})
+        if campus and section and section.campus_id != campus.id:
+            raise serializers.ValidationError({"section": "Section must belong to the selected campus."})
+        if campus and subject and subject.campus_id != campus.id:
+            raise serializers.ValidationError({"subject": "Subject must belong to the selected campus."})
+        if max_marks is not None and max_marks <= 0:
+            raise serializers.ValidationError({"max_marks": "Max marks must be greater than zero."})
+        if pass_marks is not None and max_marks is not None and (pass_marks < 0 or pass_marks > max_marks):
+            raise serializers.ValidationError({"pass_marks": "Pass marks must be between zero and max marks."})
+        if weightage is not None and (weightage <= 0 or weightage > 100):
+            raise serializers.ValidationError({"weightage": "Weightage must be between 0 and 100."})
+        return attrs
+
+
+class ExamScheduleSerializer(serializers.ModelSerializer):
+    campus_name = serializers.CharField(source="campus.name", read_only=True)
+    exam_type_name = serializers.CharField(source="exam_type.name", read_only=True)
+    section_label = serializers.SerializerMethodField()
+    subject_name = serializers.CharField(source="subject.name", read_only=True)
+    created_by_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ExamSchedule
+        fields = (
+            "id",
+            "campus",
+            "campus_name",
+            "exam_type",
+            "exam_type_name",
+            "section",
+            "section_label",
+            "subject",
+            "subject_name",
+            "title",
+            "exam_date",
+            "start_time",
+            "end_time",
+            "max_marks",
+            "venue",
+            "instructions",
+            "status",
+            "created_by",
+            "created_by_name",
+            "created_at",
+            "updated_at",
+        )
+        read_only_fields = ("created_by", "created_at", "updated_at")
+
+    def get_section_label(self, obj: ExamSchedule) -> str:
+        return f"{obj.section.grade_name} - {obj.section.section_name}"
+
+    def get_created_by_name(self, obj: ExamSchedule) -> str:
+        if not obj.created_by:
+            return ""
+        return obj.created_by.get_full_name() or obj.created_by.username
+
+    def validate(self, attrs):
+        campus = attrs.get("campus", getattr(self.instance, "campus", None))
+        exam_type = attrs.get("exam_type", getattr(self.instance, "exam_type", None))
+        section = attrs.get("section", getattr(self.instance, "section", None))
+        subject = attrs.get("subject", getattr(self.instance, "subject", None))
+        start_time = attrs.get("start_time", getattr(self.instance, "start_time", None))
+        end_time = attrs.get("end_time", getattr(self.instance, "end_time", None))
+        max_marks = attrs.get("max_marks", getattr(self.instance, "max_marks", None))
+        title = (attrs.get("title", getattr(self.instance, "title", "")) or "").strip()
+        attrs["title"] = title
+        if campus and exam_type and exam_type.campus_id != campus.id:
+            raise serializers.ValidationError({"exam_type": "Exam type must belong to the selected campus."})
+        if campus and section and section.campus_id != campus.id:
+            raise serializers.ValidationError({"section": "Section must belong to the selected campus."})
+        if campus and subject and subject.campus_id != campus.id:
+            raise serializers.ValidationError({"subject": "Subject must belong to the selected campus."})
+        if start_time and end_time and end_time <= start_time:
+            raise serializers.ValidationError({"end_time": "End time must be after start time."})
+        if max_marks is not None and max_marks <= 0:
+            raise serializers.ValidationError({"max_marks": "Max marks must be greater than zero."})
+        if not title:
+            raise serializers.ValidationError({"title": "Exam schedule title is required."})
         return attrs
 
 
@@ -822,6 +1190,7 @@ class HostelAllocationSerializer(serializers.ModelSerializer):
 class AssignedWorkSerializer(serializers.ModelSerializer):
     section_label = serializers.SerializerMethodField()
     assigned_by_name = serializers.SerializerMethodField()
+    submission_count = serializers.IntegerField(read_only=True)
 
     class Meta:
         model = AssignedWork
@@ -836,10 +1205,15 @@ class AssignedWorkSerializer(serializers.ModelSerializer):
             "description",
             "due_date",
             "status",
+            "file_url",
+            "file_name",
+            "file_content_type",
+            "published_on",
+            "submission_count",
             "created_at",
             "updated_at",
         )
-        read_only_fields = ("assigned_by", "created_at", "updated_at")
+        read_only_fields = ("assigned_by", "file_url", "file_name", "file_content_type", "submission_count", "created_at", "updated_at")
 
     def get_section_label(self, obj: AssignedWork) -> str:
         return f"{obj.section.grade_name} - {obj.section.section_name}"
@@ -853,8 +1227,93 @@ class AssignedWorkSerializer(serializers.ModelSerializer):
         request = self.context.get("request")
         user = getattr(request, "user", None)
         section = attrs.get("section", getattr(self.instance, "section", None))
-        if user and getattr(user, "role", None) == UserRole.TEACHER and section and section.class_teacher_id != user.id:
-            raise serializers.ValidationError({"section": "Teachers can assign work only for assigned sections."})
+        subject = (attrs.get("subject", getattr(self.instance, "subject", "")) or "").strip()
+        attrs["subject"] = subject
+        if user and getattr(user, "role", None) == UserRole.TEACHER and section:
+            is_class_teacher = section.class_teacher_id == user.id
+            has_subject_access = bool(subject) and TeacherSubjectAllocation.objects.filter(
+                section=section,
+                teacher=user,
+                subject__iexact=subject,
+                is_active=True,
+            ).exists()
+            if not (is_class_teacher or has_subject_access):
+                raise serializers.ValidationError(
+                    {"section": "Teachers can assign work only for assigned sections or allotted subjects."}
+                )
+        return attrs
+
+
+class AssignmentSubmissionSerializer(serializers.ModelSerializer):
+    assignment_title = serializers.CharField(source="assignment.title", read_only=True)
+    assignment_subject = serializers.CharField(source="assignment.subject", read_only=True)
+    section_label = serializers.SerializerMethodField()
+    student_name = serializers.CharField(source="student.full_name", read_only=True)
+    admission_number = serializers.CharField(source="student.admission_number", read_only=True)
+    submitted_by_name = serializers.SerializerMethodField()
+    checked_by_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = AssignmentSubmission
+        fields = (
+            "id",
+            "assignment",
+            "assignment_title",
+            "assignment_subject",
+            "section_label",
+            "student",
+            "student_name",
+            "admission_number",
+            "submitted_by",
+            "submitted_by_name",
+            "file_url",
+            "file_name",
+            "file_content_type",
+            "notes",
+            "status",
+            "remarks",
+            "checked_by",
+            "checked_by_name",
+            "checked_at",
+            "submitted_at",
+            "created_at",
+            "updated_at",
+        )
+        read_only_fields = (
+            "submitted_by",
+            "file_url",
+            "file_name",
+            "file_content_type",
+            "status",
+            "remarks",
+            "checked_by",
+            "checked_at",
+            "created_at",
+            "updated_at",
+        )
+
+    def get_section_label(self, obj: AssignmentSubmission) -> str:
+        return f"{obj.assignment.section.grade_name} - {obj.assignment.section.section_name}"
+
+    def get_submitted_by_name(self, obj: AssignmentSubmission) -> str:
+        if not obj.submitted_by:
+            return ""
+        return obj.submitted_by.get_full_name() or obj.submitted_by.username
+
+    def get_checked_by_name(self, obj: AssignmentSubmission) -> str:
+        if not obj.checked_by:
+            return ""
+        return obj.checked_by.get_full_name() or obj.checked_by.username
+
+    def validate(self, attrs):
+        request = self.context.get("request")
+        user = getattr(request, "user", None)
+        assignment = attrs.get("assignment", getattr(self.instance, "assignment", None))
+        student = attrs.get("student", getattr(self.instance, "student", None))
+        if assignment and student and assignment.section_id != student.section_id:
+            raise serializers.ValidationError({"student": "Submission student must belong to the assignment section."})
+        if user and getattr(user, "role", None) == UserRole.STUDENT and student and student.user_id != user.id:
+            raise serializers.ValidationError({"student": "Students can submit only their own assignments."})
         return attrs
 
 
@@ -875,11 +1334,14 @@ class LearningResourceSerializer(serializers.ModelSerializer):
             "resource_type",
             "description",
             "file_url",
+            "file_name",
+            "file_content_type",
             "published_on",
+            "is_published",
             "created_at",
             "updated_at",
         )
-        read_only_fields = ("uploaded_by", "created_at", "updated_at")
+        read_only_fields = ("uploaded_by", "file_url", "file_name", "file_content_type", "created_at", "updated_at")
 
     def get_section_label(self, obj: LearningResource) -> str:
         return f"{obj.section.grade_name} - {obj.section.section_name}"
@@ -893,8 +1355,20 @@ class LearningResourceSerializer(serializers.ModelSerializer):
         request = self.context.get("request")
         user = getattr(request, "user", None)
         section = attrs.get("section", getattr(self.instance, "section", None))
-        if user and getattr(user, "role", None) == UserRole.TEACHER and section and section.class_teacher_id != user.id:
-            raise serializers.ValidationError({"section": "Teachers can upload resources only for assigned sections."})
+        subject = (attrs.get("subject", getattr(self.instance, "subject", "")) or "").strip()
+        attrs["subject"] = subject
+        if user and getattr(user, "role", None) == UserRole.TEACHER and section:
+            is_class_teacher = section.class_teacher_id == user.id
+            has_subject_access = bool(subject) and TeacherSubjectAllocation.objects.filter(
+                section=section,
+                teacher=user,
+                subject__iexact=subject,
+                is_active=True,
+            ).exists()
+            if not (is_class_teacher or has_subject_access):
+                raise serializers.ValidationError(
+                    {"section": "Teachers can upload resources only for assigned sections or allotted subjects."}
+                )
         return attrs
 
 
@@ -902,6 +1376,7 @@ class ResultRecordSerializer(serializers.ModelSerializer):
     student_name = serializers.CharField(source="student.full_name", read_only=True)
     section_label = serializers.SerializerMethodField()
     recorded_by_name = serializers.SerializerMethodField()
+    reviewed_by_name = serializers.SerializerMethodField()
     percentage = serializers.SerializerMethodField()
 
     class Meta:
@@ -921,10 +1396,29 @@ class ResultRecordSerializer(serializers.ModelSerializer):
             "grade",
             "remarks",
             "published_on",
+            "is_published",
+            "review_status",
+            "marks_file_url",
+            "marks_file_name",
+            "marks_file_content_type",
+            "reviewed_by",
+            "reviewed_by_name",
+            "reviewed_at",
+            "review_note",
             "created_at",
             "updated_at",
         )
-        read_only_fields = ("recorded_by", "created_at", "updated_at")
+        read_only_fields = (
+            "recorded_by",
+            "marks_file_url",
+            "marks_file_name",
+            "marks_file_content_type",
+            "reviewed_by",
+            "reviewed_at",
+            "review_note",
+            "created_at",
+            "updated_at",
+        )
 
     def get_section_label(self, obj: ResultRecord) -> str:
         return f"{obj.student.section.grade_name} - {obj.student.section.section_name}"
@@ -933,6 +1427,11 @@ class ResultRecordSerializer(serializers.ModelSerializer):
         if not obj.recorded_by:
             return ""
         return obj.recorded_by.get_full_name() or obj.recorded_by.username
+
+    def get_reviewed_by_name(self, obj: ResultRecord) -> str:
+        if not obj.reviewed_by:
+            return ""
+        return obj.reviewed_by.get_full_name() or obj.reviewed_by.username
 
     def get_percentage(self, obj: ResultRecord) -> str:
         if not obj.max_score:
@@ -945,8 +1444,20 @@ class ResultRecordSerializer(serializers.ModelSerializer):
         student = attrs.get("student", getattr(self.instance, "student", None))
         score = attrs.get("score", getattr(self.instance, "score", None))
         max_score = attrs.get("max_score", getattr(self.instance, "max_score", None))
-        if user and getattr(user, "role", None) == UserRole.TEACHER and student and student.section.class_teacher_id != user.id:
-            raise serializers.ValidationError({"student": "Teachers can record results only for assigned sections."})
+        subject = (attrs.get("subject", getattr(self.instance, "subject", "")) or "").strip()
+        attrs["subject"] = subject
+        if user and getattr(user, "role", None) == UserRole.TEACHER and student:
+            is_class_teacher = student.section.class_teacher_id == user.id
+            has_subject_access = bool(subject) and TeacherSubjectAllocation.objects.filter(
+                section=student.section,
+                teacher=user,
+                subject__iexact=subject,
+                is_active=True,
+            ).exists()
+            if not (is_class_teacher or has_subject_access):
+                raise serializers.ValidationError(
+                    {"student": "Teachers can record results only for assigned sections or allotted subjects."}
+                )
         if score is not None and score < 0:
             raise serializers.ValidationError({"score": "Score cannot be negative."})
         if max_score is not None and max_score <= 0:
@@ -1002,27 +1513,168 @@ class AdmitCardSerializer(serializers.ModelSerializer):
         return attrs
 
 
+class FeeStructureSerializer(serializers.ModelSerializer):
+    campus_name = serializers.CharField(source="campus.name", read_only=True)
+    section_label = serializers.SerializerMethodField()
+    created_by_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = FeeStructure
+        fields = (
+            "id",
+            "campus",
+            "campus_name",
+            "section",
+            "section_label",
+            "title",
+            "description",
+            "amount",
+            "late_fee",
+            "discount_amount",
+            "due_day",
+            "is_active",
+            "created_by",
+            "created_by_name",
+            "created_at",
+            "updated_at",
+        )
+        read_only_fields = ("created_by", "created_at", "updated_at")
+
+    def get_section_label(self, obj: FeeStructure) -> str:
+        if not obj.section:
+            return "All sections"
+        return f"{obj.section.grade_name} - {obj.section.section_name}"
+
+    def get_created_by_name(self, obj: FeeStructure) -> str:
+        if not obj.created_by:
+            return ""
+        return obj.created_by.get_full_name() or obj.created_by.username
+
+    def validate(self, attrs):
+        amount = attrs.get("amount", getattr(self.instance, "amount", 0))
+        late_fee = attrs.get("late_fee", getattr(self.instance, "late_fee", 0))
+        discount_amount = attrs.get("discount_amount", getattr(self.instance, "discount_amount", 0))
+        if amount is not None and amount <= 0:
+            raise serializers.ValidationError({"amount": "Fee structure amount must be greater than zero."})
+        if late_fee is not None and late_fee < 0:
+            raise serializers.ValidationError({"late_fee": "Late fee cannot be negative."})
+        if discount_amount is not None and discount_amount < 0:
+            raise serializers.ValidationError({"discount_amount": "Discount cannot be negative."})
+        if amount is not None and late_fee is not None and discount_amount is not None and discount_amount > amount + late_fee:
+            raise serializers.ValidationError({"discount_amount": "Discount cannot exceed payable fee."})
+        campus = attrs.get("campus", getattr(self.instance, "campus", None))
+        section = attrs.get("section", getattr(self.instance, "section", None))
+        if campus and section and section.campus_id != campus.id:
+            raise serializers.ValidationError({"section": "Section must belong to the selected campus."})
+        return attrs
+
+
+class PaymentGatewayConfigSerializer(serializers.ModelSerializer):
+    campus_name = serializers.CharField(source="campus.name", read_only=True)
+    masked_key_id = serializers.SerializerMethodField()
+    key_secret = serializers.CharField(write_only=True, required=False, allow_blank=True, trim_whitespace=False)
+    webhook_secret = serializers.CharField(write_only=True, required=False, allow_blank=True, trim_whitespace=False)
+    created_by_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = PaymentGatewayConfig
+        fields = (
+            "id",
+            "campus",
+            "campus_name",
+            "provider",
+            "key_id",
+            "masked_key_id",
+            "key_secret",
+            "webhook_secret",
+            "upi_id",
+            "allowed_methods",
+            "is_active",
+            "created_by",
+            "created_by_name",
+            "created_at",
+            "updated_at",
+        )
+        read_only_fields = ("created_by", "created_at", "updated_at")
+
+    def get_masked_key_id(self, obj: PaymentGatewayConfig) -> str:
+        if not obj.key_id:
+            return ""
+        return f"{obj.key_id[:4]}...{obj.key_id[-4:]}" if len(obj.key_id) > 8 else "****"
+
+    def get_created_by_name(self, obj: PaymentGatewayConfig) -> str:
+        if not obj.created_by:
+            return ""
+        return obj.created_by.get_full_name() or obj.created_by.username
+
+    def create(self, validated_data):
+        key_secret = validated_data.pop("key_secret", "")
+        webhook_secret = validated_data.pop("webhook_secret", "")
+        instance = super().create(validated_data)
+        changed = []
+        if key_secret:
+            instance.set_key_secret(key_secret)
+            changed.append("key_secret_encrypted")
+        if webhook_secret:
+            instance.set_webhook_secret(webhook_secret)
+            changed.append("webhook_secret_encrypted")
+        if changed:
+            instance.save(update_fields=changed + ["updated_at"])
+        return instance
+
+    def update(self, instance, validated_data):
+        key_secret = validated_data.pop("key_secret", "")
+        webhook_secret = validated_data.pop("webhook_secret", "")
+        instance = super().update(instance, validated_data)
+        changed = []
+        if key_secret:
+            instance.set_key_secret(key_secret)
+            changed.append("key_secret_encrypted")
+        if webhook_secret:
+            instance.set_webhook_secret(webhook_secret)
+            changed.append("webhook_secret_encrypted")
+        if changed:
+            instance.save(update_fields=changed + ["updated_at"])
+        return instance
+
+
 class FeeAssignmentSerializer(serializers.ModelSerializer):
+    fee_structure_title = serializers.CharField(source="fee_structure.title", read_only=True)
     student_name = serializers.CharField(source="student.full_name", read_only=True)
+    section_label = serializers.SerializerMethodField()
     amount_paid = serializers.SerializerMethodField()
     outstanding_amount = serializers.SerializerMethodField()
+    payable_amount = serializers.SerializerMethodField()
 
     class Meta:
         model = FeeAssignment
         fields = (
             "id",
+            "fee_structure",
+            "fee_structure_title",
             "student",
             "student_name",
+            "section_label",
             "title",
             "amount",
+            "discount_amount",
+            "late_fee",
+            "payable_amount",
             "amount_paid",
             "outstanding_amount",
             "due_date",
+            "invoice_number",
+            "invoice_generated_at",
+            "reminder_count",
+            "last_reminder_at",
             "status",
             "created_at",
             "updated_at",
         )
-        read_only_fields = ("status",)
+        read_only_fields = ("status", "invoice_generated_at", "reminder_count", "last_reminder_at")
+
+    def get_section_label(self, obj: FeeAssignment) -> str:
+        return f"{obj.student.section.grade_name} - {obj.student.section.section_name}"
 
     def get_amount_paid(self, obj: FeeAssignment) -> str:
         paid = obj.payments.aggregate(total=Sum("amount_paid")).get("total") or 0
@@ -1030,34 +1682,82 @@ class FeeAssignmentSerializer(serializers.ModelSerializer):
 
     def get_outstanding_amount(self, obj: FeeAssignment) -> str:
         paid = obj.payments.aggregate(total=Sum("amount_paid")).get("total") or 0
-        return str(max(obj.amount - paid, 0))
+        return str(max(obj.payable_amount - paid, 0))
+
+    def get_payable_amount(self, obj: FeeAssignment) -> str:
+        return str(obj.payable_amount)
 
     def validate_amount(self, value):
         if value <= 0:
             raise serializers.ValidationError("Fee amount must be greater than zero.")
         return value
 
+    def validate(self, attrs):
+        student = attrs.get("student", getattr(self.instance, "student", None))
+        fee_structure = attrs.get("fee_structure", getattr(self.instance, "fee_structure", None))
+        if student and fee_structure and fee_structure.campus_id != student.campus_id:
+            raise serializers.ValidationError({"fee_structure": "Fee structure must belong to the student's campus."})
+        amount = attrs.get("amount", getattr(self.instance, "amount", 0))
+        late_fee = attrs.get("late_fee", getattr(self.instance, "late_fee", 0))
+        discount_amount = attrs.get("discount_amount", getattr(self.instance, "discount_amount", 0))
+        if discount_amount is not None and discount_amount > amount + late_fee:
+            raise serializers.ValidationError({"discount_amount": "Discount cannot exceed payable fee."})
+        return attrs
+
 
 class PaymentSerializer(serializers.ModelSerializer):
+    campus = serializers.PrimaryKeyRelatedField(read_only=True)
+    campus_name = serializers.CharField(source="campus.name", read_only=True)
     fee_title = serializers.CharField(source="fee_assignment.title", read_only=True)
     student_name = serializers.CharField(source="fee_assignment.student.full_name", read_only=True)
+    outstanding_after_payment = serializers.SerializerMethodField()
 
     class Meta:
         model = Payment
         fields = (
             "id",
+            "campus",
+            "campus_name",
             "fee_assignment",
             "fee_title",
             "student_name",
             "amount_paid",
+            "discount_amount",
+            "late_fee",
+            "pending_amount",
             "paid_on",
             "payment_method",
             "reference_number",
+            "payment_status",
+            "gateway_name",
+            "gateway_order_id",
+            "transaction_id",
+            "receipt_number",
+            "invoice_number",
+            "webhook_verified",
+            "paid_at",
+            "receipt_pdf_url",
+            "outstanding_after_payment",
             "collected_by",
             "created_at",
             "updated_at",
         )
-        read_only_fields = ("collected_by", "created_at", "updated_at")
+        read_only_fields = (
+            "campus",
+            "pending_amount",
+            "receipt_number",
+            "invoice_number",
+            "webhook_verified",
+            "paid_at",
+            "receipt_pdf_url",
+            "outstanding_after_payment",
+            "collected_by",
+            "created_at",
+            "updated_at",
+        )
+
+    def get_outstanding_after_payment(self, obj: Payment) -> str:
+        return str(obj.pending_amount)
 
     def validate_amount_paid(self, value):
         if value <= 0:
@@ -1074,7 +1774,7 @@ class PaymentSerializer(serializers.ModelSerializer):
                 .get("total")
                 or 0
             )
-            if existing_total + amount_paid > fee_assignment.amount:
+            if existing_total + amount_paid > fee_assignment.payable_amount:
                 raise serializers.ValidationError({"amount_paid": "Payment cannot exceed the fee outstanding amount."})
         return attrs
 
@@ -1099,20 +1799,37 @@ class PaymentTransactionSerializer(serializers.ModelSerializer):
             "provider",
             "method",
             "amount",
+            "discount_amount",
+            "late_fee",
+            "pending_amount",
             "currency",
             "status",
+            "gateway_name",
             "gateway_order_id",
             "gateway_payment_id",
             "gateway_signature",
+            "transaction_id",
             "receipt_number",
+            "invoice_number",
             "webhook_verified",
+            "paid_at",
             "raw_payload",
             "created_by",
             "created_by_name",
             "created_at",
             "updated_at",
         )
-        read_only_fields = ("created_by", "created_at", "updated_at")
+        read_only_fields = (
+            "payment",
+            "gateway_order_id",
+            "receipt_number",
+            "invoice_number",
+            "webhook_verified",
+            "paid_at",
+            "created_by",
+            "created_at",
+            "updated_at",
+        )
 
     def get_created_by_name(self, obj: PaymentTransaction) -> str:
         if not obj.created_by:
@@ -1133,6 +1850,56 @@ class PaymentTransactionSerializer(serializers.ModelSerializer):
         return attrs
 
 
+class SalarySetupSerializer(serializers.ModelSerializer):
+    campus_name = serializers.CharField(source="campus.name", read_only=True)
+    staff_name = serializers.SerializerMethodField()
+    staff_role = serializers.CharField(source="staff_user.role", read_only=True)
+    created_by_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = SalarySetup
+        fields = (
+            "id",
+            "campus",
+            "campus_name",
+            "staff_user",
+            "staff_name",
+            "staff_role",
+            "gross_salary",
+            "default_deductions",
+            "default_bonus",
+            "is_active",
+            "created_by",
+            "created_by_name",
+            "created_at",
+            "updated_at",
+        )
+        read_only_fields = ("created_by", "created_at", "updated_at")
+
+    def get_staff_name(self, obj: SalarySetup) -> str:
+        return obj.staff_user.get_full_name() or obj.staff_user.username
+
+    def get_created_by_name(self, obj: SalarySetup) -> str:
+        if not obj.created_by:
+            return ""
+        return obj.created_by.get_full_name() or obj.created_by.username
+
+    def validate(self, attrs):
+        campus = attrs.get("campus", getattr(self.instance, "campus", None))
+        staff_user = attrs.get("staff_user", getattr(self.instance, "staff_user", None))
+        if staff_user and staff_user.role == UserRole.STUDENT:
+            raise serializers.ValidationError({"staff_user": "Salary setup cannot be created for student users."})
+        if campus and staff_user and getattr(staff_user, "school_id", None) and staff_user.school_id != campus.id:
+            raise serializers.ValidationError({"staff_user": "Staff user must belong to the selected campus."})
+        for field in ("gross_salary", "default_deductions", "default_bonus"):
+            value = attrs.get(field, getattr(self.instance, field, 0))
+            if value is not None and value < 0:
+                raise serializers.ValidationError({field: "Value cannot be negative."})
+        if attrs.get("gross_salary", getattr(self.instance, "gross_salary", 0)) <= 0:
+            raise serializers.ValidationError({"gross_salary": "Gross salary must be greater than zero."})
+        return attrs
+
+
 class SalaryRecordSerializer(serializers.ModelSerializer):
     campus_name = serializers.CharField(source="campus.name", read_only=True)
     staff_name = serializers.SerializerMethodField()
@@ -1145,6 +1912,7 @@ class SalaryRecordSerializer(serializers.ModelSerializer):
             "id",
             "campus",
             "campus_name",
+            "salary_setup",
             "staff_user",
             "staff_name",
             "staff_role",
@@ -1161,13 +1929,16 @@ class SalaryRecordSerializer(serializers.ModelSerializer):
             "payment_status",
             "paid_on",
             "slip_url",
+            "slip_number",
+            "payment_reference",
+            "paid_by",
             "status",
             "created_by",
             "created_by_name",
             "created_at",
             "updated_at",
         )
-        read_only_fields = ("created_by", "created_at", "updated_at")
+        read_only_fields = ("paid_by", "created_by", "created_at", "updated_at")
 
     def get_staff_name(self, obj: SalaryRecord) -> str:
         return obj.staff_user.get_full_name() or obj.staff_user.username
@@ -1188,6 +1959,67 @@ class SalaryRecordSerializer(serializers.ModelSerializer):
             if value is not None and value < 0:
                 raise serializers.ValidationError({field: "Value cannot be negative."})
         return attrs
+
+
+class FinanceEventSerializer(serializers.ModelSerializer):
+    campus_name = serializers.CharField(source="campus.name", read_only=True)
+    created_by_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = FinanceEvent
+        fields = (
+            "id",
+            "campus",
+            "campus_name",
+            "event_type",
+            "payload",
+            "created_by",
+            "created_by_name",
+            "created_at",
+            "updated_at",
+        )
+        read_only_fields = ("created_by", "created_at", "updated_at")
+
+    def get_created_by_name(self, obj: FinanceEvent) -> str:
+        if not obj.created_by:
+            return ""
+        return obj.created_by.get_full_name() or obj.created_by.username
+
+
+class AcademicEventSerializer(serializers.ModelSerializer):
+    campus_name = serializers.CharField(source="campus.name", read_only=True)
+    student_name = serializers.CharField(source="student.full_name", read_only=True)
+    teacher_name = serializers.SerializerMethodField()
+    created_by_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = AcademicEvent
+        fields = (
+            "id",
+            "campus",
+            "campus_name",
+            "event_type",
+            "payload",
+            "student",
+            "student_name",
+            "teacher",
+            "teacher_name",
+            "created_by",
+            "created_by_name",
+            "created_at",
+            "updated_at",
+        )
+        read_only_fields = ("created_by", "created_at", "updated_at")
+
+    def get_teacher_name(self, obj: AcademicEvent) -> str:
+        if not obj.teacher:
+            return ""
+        return obj.teacher.get_full_name() or obj.teacher.username
+
+    def get_created_by_name(self, obj: AcademicEvent) -> str:
+        if not obj.created_by:
+            return ""
+        return obj.created_by.get_full_name() or obj.created_by.username
 
 
 class MessageTemplateSerializer(serializers.ModelSerializer):
@@ -1218,6 +2050,99 @@ class MessageTemplateSerializer(serializers.ModelSerializer):
         if not obj.created_by:
             return ""
         return obj.created_by.get_full_name() or obj.created_by.username
+
+
+class CommunicationSettingSerializer(serializers.ModelSerializer):
+    campus_name = serializers.CharField(source="campus.name", read_only=True)
+    created_by_name = serializers.SerializerMethodField()
+    has_api_key = serializers.SerializerMethodField()
+    has_api_secret = serializers.SerializerMethodField()
+    has_smtp_password = serializers.SerializerMethodField()
+
+    class Meta:
+        model = CommunicationSetting
+        fields = (
+            "id",
+            "campus",
+            "campus_name",
+            "channel",
+            "provider_name",
+            "sender_id",
+            "api_url",
+            "api_key",
+            "api_secret",
+            "smtp_host",
+            "smtp_port",
+            "smtp_username",
+            "smtp_password",
+            "whatsapp_phone_number_id",
+            "is_active",
+            "has_api_key",
+            "has_api_secret",
+            "has_smtp_password",
+            "created_by",
+            "created_by_name",
+            "created_at",
+            "updated_at",
+        )
+        read_only_fields = ("created_by", "created_at", "updated_at")
+        extra_kwargs = {
+            "api_key": {"write_only": True, "required": False, "allow_blank": True},
+            "api_secret": {"write_only": True, "required": False, "allow_blank": True},
+            "smtp_password": {"write_only": True, "required": False, "allow_blank": True},
+        }
+
+    def get_created_by_name(self, obj: CommunicationSetting) -> str:
+        if not obj.created_by:
+            return ""
+        return obj.created_by.get_full_name() or obj.created_by.username
+
+    def get_has_api_key(self, obj: CommunicationSetting) -> bool:
+        return bool(obj.api_key)
+
+    def get_has_api_secret(self, obj: CommunicationSetting) -> bool:
+        return bool(obj.api_secret)
+
+    def get_has_smtp_password(self, obj: CommunicationSetting) -> bool:
+        return bool(obj.smtp_password)
+
+    def create(self, validated_data):
+        api_key = validated_data.pop("api_key", "")
+        api_secret = validated_data.pop("api_secret", "")
+        smtp_password = validated_data.pop("smtp_password", "")
+        instance = super().create(validated_data)
+        changed = []
+        if api_key:
+            instance.set_api_key(api_key)
+            changed.append("api_key")
+        if api_secret:
+            instance.set_api_secret(api_secret)
+            changed.append("api_secret")
+        if smtp_password:
+            instance.set_smtp_password(smtp_password)
+            changed.append("smtp_password")
+        if changed:
+            instance.save(update_fields=changed + ["updated_at"])
+        return instance
+
+    def update(self, instance, validated_data):
+        api_key = validated_data.pop("api_key", "")
+        api_secret = validated_data.pop("api_secret", "")
+        smtp_password = validated_data.pop("smtp_password", "")
+        instance = super().update(instance, validated_data)
+        changed = []
+        if api_key:
+            instance.set_api_key(api_key)
+            changed.append("api_key")
+        if api_secret:
+            instance.set_api_secret(api_secret)
+            changed.append("api_secret")
+        if smtp_password:
+            instance.set_smtp_password(smtp_password)
+            changed.append("smtp_password")
+        if changed:
+            instance.save(update_fields=changed + ["updated_at"])
+        return instance
 
 
 class OutboundMessageSerializer(serializers.ModelSerializer):
@@ -1276,6 +2201,47 @@ class OutboundMessageSerializer(serializers.ModelSerializer):
         return attrs
 
 
+class DeviceSyncLogSerializer(serializers.ModelSerializer):
+    campus_name = serializers.CharField(source="campus.name", read_only=True)
+    device_name = serializers.CharField(source="device.name", read_only=True)
+    device_code = serializers.CharField(source="device.device_code", read_only=True)
+    created_by_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = DeviceSyncLog
+        fields = (
+            "id",
+            "campus",
+            "campus_name",
+            "device",
+            "device_name",
+            "device_code",
+            "status",
+            "log_type",
+            "payload",
+            "error_message",
+            "attempt_count",
+            "synced_at",
+            "created_by",
+            "created_by_name",
+            "created_at",
+            "updated_at",
+        )
+        read_only_fields = ("created_by", "created_at", "updated_at")
+
+    def get_created_by_name(self, obj: DeviceSyncLog) -> str:
+        if not obj.created_by:
+            return ""
+        return obj.created_by.get_full_name() or obj.created_by.username
+
+    def validate(self, attrs):
+        campus = attrs.get("campus", getattr(self.instance, "campus", None))
+        device = attrs.get("device", getattr(self.instance, "device", None))
+        if campus and device and device.campus_id != campus.id:
+            raise serializers.ValidationError({"device": "Device must belong to the selected campus."})
+        return attrs
+
+
 class AILogSerializer(serializers.ModelSerializer):
     campus_name = serializers.CharField(source="campus.name", read_only=True)
     user_name = serializers.SerializerMethodField()
@@ -1316,6 +2282,7 @@ class AILogSerializer(serializers.ModelSerializer):
 class DocumentSerializer(serializers.ModelSerializer):
     campus_name = serializers.CharField(source="campus.name", read_only=True)
     student_name = serializers.CharField(source="student.full_name", read_only=True)
+    staff_user_name = serializers.SerializerMethodField()
     uploaded_by_name = serializers.SerializerMethodField()
     created_by_name = serializers.SerializerMethodField()
 
@@ -1327,6 +2294,8 @@ class DocumentSerializer(serializers.ModelSerializer):
             "campus_name",
             "student",
             "student_name",
+            "staff_user",
+            "staff_user_name",
             "uploaded_by",
             "uploaded_by_name",
             "title",
@@ -1345,6 +2314,11 @@ class DocumentSerializer(serializers.ModelSerializer):
             return ""
         return obj.uploaded_by.get_full_name() or obj.uploaded_by.username
 
+    def get_staff_user_name(self, obj: Document) -> str:
+        if not obj.staff_user:
+            return ""
+        return obj.staff_user.get_full_name() or obj.staff_user.username
+
     def get_created_by_name(self, obj: Document) -> str:
         if not obj.created_by:
             return ""
@@ -1353,9 +2327,342 @@ class DocumentSerializer(serializers.ModelSerializer):
     def validate(self, attrs):
         campus = attrs.get("campus", getattr(self.instance, "campus", None))
         student = attrs.get("student", getattr(self.instance, "student", None))
+        staff_user = attrs.get("staff_user", getattr(self.instance, "staff_user", None))
         if campus and student and student.campus_id != campus.id:
             raise serializers.ValidationError({"student": "Student must belong to the selected campus."})
+        if staff_user and staff_user.role == UserRole.STUDENT:
+            raise serializers.ValidationError({"staff_user": "Staff document cannot be linked to a student user."})
+        if campus and staff_user and staff_user.school_id and staff_user.school_id != campus.id:
+            raise serializers.ValidationError({"staff_user": "Staff user must belong to the selected campus."})
         return attrs
+
+
+class SaaSPlanSerializer(serializers.ModelSerializer):
+    enabled_module_count = serializers.SerializerMethodField()
+
+    class Meta:
+        model = SaaSPlan
+        fields = (
+            "id",
+            "code",
+            "name",
+            "description",
+            "monthly_price",
+            "annual_price",
+            "custom_pricing_enabled",
+            "student_limit",
+            "teacher_limit",
+            "storage_limit_mb",
+            "ai_monthly_limit",
+            "whatsapp_monthly_limit",
+            "sms_monthly_limit",
+            "modules",
+            "enabled_module_count",
+            "is_active",
+            "created_by",
+            "created_at",
+            "updated_at",
+        )
+        read_only_fields = ("created_by", "created_at", "updated_at")
+
+    def get_enabled_module_count(self, obj: SaaSPlan) -> int:
+        return sum(1 for value in (obj.modules or {}).values() if value)
+
+
+class SchoolSubscriptionSerializer(serializers.ModelSerializer):
+    campus_name = serializers.CharField(source="campus.name", read_only=True)
+    campus_code = serializers.CharField(source="campus.code", read_only=True)
+    plan_name = serializers.CharField(source="plan.name", read_only=True)
+    plan_code = serializers.CharField(source="plan.code", read_only=True)
+    effective_price = serializers.SerializerMethodField()
+    grace_ends_on = serializers.SerializerMethodField()
+    access_allowed = serializers.SerializerMethodField()
+
+    class Meta:
+        model = SchoolSubscription
+        fields = (
+            "id",
+            "campus",
+            "campus_name",
+            "campus_code",
+            "plan",
+            "plan_name",
+            "plan_code",
+            "status",
+            "billing_cycle",
+            "start_date",
+            "end_date",
+            "grace_period_days",
+            "grace_ends_on",
+            "next_billing_date",
+            "custom_price",
+            "effective_price",
+            "currency",
+            "gst_number",
+            "auto_disable_on_expiry",
+            "access_allowed",
+            "last_alert_at",
+            "created_by",
+            "created_at",
+            "updated_at",
+        )
+        read_only_fields = ("created_by", "last_alert_at", "created_at", "updated_at")
+
+    def get_effective_price(self, obj: SchoolSubscription) -> str:
+        return str(obj.effective_price)
+
+    def get_grace_ends_on(self, obj: SchoolSubscription):
+        return obj.grace_ends_on
+
+    def get_access_allowed(self, obj: SchoolSubscription) -> bool:
+        return obj.is_access_allowed
+
+    def validate(self, attrs):
+        plan = attrs.get("plan", getattr(self.instance, "plan", None))
+        custom_price = attrs.get("custom_price", getattr(self.instance, "custom_price", None))
+        if custom_price is not None and plan and not plan.custom_pricing_enabled:
+            raise serializers.ValidationError({"custom_price": "Custom pricing is not enabled for this plan."})
+        return attrs
+
+
+class SubscriptionInvoiceSerializer(serializers.ModelSerializer):
+    campus_name = serializers.CharField(source="campus.name", read_only=True)
+    plan_name = serializers.CharField(source="subscription.plan.name", read_only=True)
+    paid_amount = serializers.SerializerMethodField()
+    outstanding_amount = serializers.SerializerMethodField()
+
+    class Meta:
+        model = SubscriptionInvoice
+        fields = (
+            "id",
+            "subscription",
+            "campus",
+            "campus_name",
+            "plan_name",
+            "invoice_number",
+            "billing_period_start",
+            "billing_period_end",
+            "base_amount",
+            "discount_amount",
+            "gst_rate",
+            "gst_amount",
+            "total_amount",
+            "paid_amount",
+            "outstanding_amount",
+            "currency",
+            "status",
+            "due_date",
+            "paid_at",
+            "pdf_url",
+            "created_by",
+            "created_at",
+            "updated_at",
+        )
+        read_only_fields = ("gst_amount", "total_amount", "paid_at", "created_by", "created_at", "updated_at")
+
+    def get_paid_amount(self, obj: SubscriptionInvoice) -> str:
+        total = obj.payments.filter(payment_status="success").aggregate(total=Sum("amount")).get("total") or Decimal("0")
+        return str(total)
+
+    def get_outstanding_amount(self, obj: SubscriptionInvoice) -> str:
+        total = obj.payments.filter(payment_status="success").aggregate(total=Sum("amount")).get("total") or Decimal("0")
+        return str(max(obj.total_amount - total, Decimal("0")))
+
+
+class SubscriptionPaymentSerializer(serializers.ModelSerializer):
+    campus_name = serializers.CharField(source="campus.name", read_only=True)
+    invoice_number = serializers.CharField(source="invoice.invoice_number", read_only=True)
+
+    class Meta:
+        model = SubscriptionPayment
+        fields = (
+            "id",
+            "invoice",
+            "invoice_number",
+            "campus",
+            "campus_name",
+            "amount",
+            "payment_mode",
+            "provider",
+            "transaction_id",
+            "payment_status",
+            "paid_at",
+            "raw_payload",
+            "created_by",
+            "created_at",
+            "updated_at",
+        )
+        read_only_fields = ("created_by", "created_at", "updated_at")
+
+
+class WhiteLabelConfigSerializer(serializers.ModelSerializer):
+    campus_name = serializers.CharField(source="campus.name", read_only=True)
+    plan_code = serializers.SerializerMethodField()
+
+    class Meta:
+        model = WhiteLabelConfig
+        fields = (
+            "id",
+            "campus",
+            "campus_name",
+            "plan_code",
+            "is_enabled",
+            "custom_logo_url",
+            "custom_domain",
+            "primary_color",
+            "secondary_color",
+            "accent_color",
+            "login_heading",
+            "login_subheading",
+            "login_background_url",
+            "email_template_header",
+            "email_template_footer",
+            "report_logo_url",
+            "report_footer",
+            "created_by",
+            "created_at",
+            "updated_at",
+        )
+        read_only_fields = ("created_by", "created_at", "updated_at")
+
+    def get_plan_code(self, obj: WhiteLabelConfig) -> str:
+        subscription = obj.campus.subscriptions.select_related("plan").order_by("-end_date", "-created_at").first()
+        return subscription.plan.code if subscription else (obj.campus.subscription_plan or "").lower()
+
+    def validate(self, attrs):
+        campus = attrs.get("campus", getattr(self.instance, "campus", None))
+        enabled = attrs.get("is_enabled", getattr(self.instance, "is_enabled", False))
+        if campus and enabled:
+            subscription = campus.subscriptions.select_related("plan").order_by("-end_date", "-created_at").first()
+            plan_code = subscription.plan.code if subscription else (campus.subscription_plan or "").strip().lower()
+            if plan_code not in {"premium", "enterprise"}:
+                raise serializers.ValidationError({"is_enabled": "White label is available only for Premium and Enterprise schools."})
+        return attrs
+
+
+class UserActivityLogSerializer(serializers.ModelSerializer):
+    campus_name = serializers.CharField(source="campus.name", read_only=True)
+    user_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = UserActivityLog
+        fields = (
+            "id",
+            "campus",
+            "campus_name",
+            "user",
+            "user_name",
+            "activity_type",
+            "summary",
+            "request_path",
+            "method",
+            "ip_address",
+            "user_agent",
+            "metadata",
+            "created_at",
+            "updated_at",
+        )
+        read_only_fields = fields
+
+    def get_user_name(self, obj: UserActivityLog) -> str:
+        if not obj.user:
+            return ""
+        return obj.user.get_full_name() or obj.user.username
+
+
+class DocumentAccessLogSerializer(serializers.ModelSerializer):
+    campus_name = serializers.CharField(source="campus.name", read_only=True)
+    user_name = serializers.SerializerMethodField()
+    student_name = serializers.CharField(source="student.full_name", read_only=True)
+
+    class Meta:
+        model = DocumentAccessLog
+        fields = (
+            "id",
+            "campus",
+            "campus_name",
+            "document",
+            "user",
+            "user_name",
+            "student",
+            "student_name",
+            "access_type",
+            "file_name",
+            "granted",
+            "reason",
+            "ip_address",
+            "metadata",
+            "created_at",
+            "updated_at",
+        )
+        read_only_fields = fields
+
+    def get_user_name(self, obj: DocumentAccessLog) -> str:
+        if not obj.user:
+            return ""
+        return obj.user.get_full_name() or obj.user.username
+
+
+class EnterpriseUsageMetricSerializer(serializers.ModelSerializer):
+    campus_name = serializers.CharField(source="campus.name", read_only=True)
+
+    class Meta:
+        model = EnterpriseUsageMetric
+        fields = ("id", "campus", "campus_name", "metric_type", "period_start", "period_end", "quantity", "metadata", "created_at", "updated_at")
+
+
+class BackupPolicySerializer(serializers.ModelSerializer):
+    campus_name = serializers.CharField(source="campus.name", read_only=True)
+
+    class Meta:
+        model = BackupPolicy
+        fields = ("id", "campus", "campus_name", "backup_type", "frequency", "retention_days", "destination", "encryption_required", "is_active", "created_by", "created_at", "updated_at")
+        read_only_fields = ("created_by", "created_at", "updated_at")
+
+
+class BackupJobSerializer(serializers.ModelSerializer):
+    campus_name = serializers.CharField(source="campus.name", read_only=True)
+    policy_label = serializers.CharField(source="policy.backup_type", read_only=True)
+
+    class Meta:
+        model = BackupJob
+        fields = ("id", "policy", "policy_label", "campus", "campus_name", "backup_type", "status", "started_at", "completed_at", "storage_location", "size_bytes", "checksum", "error_message", "metadata", "created_by", "created_at", "updated_at")
+        read_only_fields = ("created_by", "created_at", "updated_at")
+
+
+class QueueJobSerializer(serializers.ModelSerializer):
+    campus_name = serializers.CharField(source="campus.name", read_only=True)
+
+    class Meta:
+        model = QueueJob
+        fields = ("id", "campus", "campus_name", "job_type", "status", "priority", "payload", "attempts", "max_attempts", "scheduled_at", "started_at", "completed_at", "error_message", "created_by", "created_at", "updated_at")
+        read_only_fields = ("created_by", "created_at", "updated_at")
+
+
+class SystemHealthSnapshotSerializer(serializers.ModelSerializer):
+    campus_name = serializers.CharField(source="campus.name", read_only=True)
+
+    class Meta:
+        model = SystemHealthSnapshot
+        fields = ("id", "campus", "campus_name", "component", "status", "latency_ms", "metric_value", "message", "metadata", "checked_at", "created_at", "updated_at")
+
+
+class SecureAPITokenSerializer(serializers.ModelSerializer):
+    campus_name = serializers.CharField(source="campus.name", read_only=True)
+    raw_token = serializers.CharField(write_only=True, required=False, allow_blank=True)
+
+    class Meta:
+        model = SecureAPIToken
+        fields = ("id", "campus", "campus_name", "name", "prefix", "raw_token", "scopes", "expires_at", "last_used_at", "is_active", "created_by", "created_at", "updated_at")
+        read_only_fields = ("prefix", "last_used_at", "created_by", "created_at", "updated_at")
+
+    def create(self, validated_data):
+        raw_token = validated_data.pop("raw_token", "") or secrets.token_urlsafe(32)
+        validated_data["prefix"] = raw_token[:12]
+        validated_data["token_hash"] = SecureAPIToken.hash_token(raw_token)
+        instance = super().create(validated_data)
+        instance._raw_token = raw_token
+        return instance
 
 
 class PlatformSettingSerializer(serializers.ModelSerializer):
@@ -1457,12 +2764,15 @@ class ApprovalRequestSerializer(serializers.ModelSerializer):
 
 
 class AnnouncementSerializer(serializers.ModelSerializer):
+    campus_name = serializers.CharField(source="campus.name", read_only=True)
     created_by_name = serializers.SerializerMethodField()
 
     class Meta:
         model = Announcement
         fields = (
             "id",
+            "campus",
+            "campus_name",
             "title",
             "message",
             "audience",
@@ -1479,6 +2789,15 @@ class AnnouncementSerializer(serializers.ModelSerializer):
         if not obj.created_by:
             return "Admin team"
         return obj.created_by.get_full_name() or obj.created_by.username
+
+    def validate(self, attrs):
+        request = self.context.get("request")
+        user = getattr(request, "user", None)
+        campus = attrs.get("campus", getattr(self.instance, "campus", None))
+        if user and getattr(user, "role", None) == UserRole.SCHOOL_ADMIN and campus is None:
+            if getattr(user, "school_id", None):
+                attrs["campus"] = user.school
+        return attrs
 
 
 class SupportTicketSerializer(serializers.ModelSerializer):
@@ -1526,3 +2845,401 @@ class SupportTicketSerializer(serializers.ModelSerializer):
         if not obj.reviewed_by:
             return ""
         return obj.reviewed_by.get_full_name() or obj.reviewed_by.username
+
+
+class AdmissionFormTemplateSerializer(serializers.ModelSerializer):
+    campus_name = serializers.CharField(source="campus.name", read_only=True)
+
+    class Meta:
+        model = AdmissionFormTemplate
+        fields = (
+            "id",
+            "campus",
+            "campus_name",
+            "name",
+            "academic_year",
+            "form_schema",
+            "admission_fee",
+            "is_public",
+            "status",
+            "created_by",
+            "created_at",
+            "updated_at",
+        )
+        read_only_fields = ("created_by", "created_at", "updated_at")
+
+    def validate_admission_fee(self, value):
+        if value < 0:
+            raise serializers.ValidationError("Admission fee cannot be negative.")
+        return value
+
+
+class AdmissionApplicationSerializer(serializers.ModelSerializer):
+    campus_name = serializers.CharField(source="campus.name", read_only=True)
+    form_name = serializers.CharField(source="form_template.name", read_only=True)
+    section_label = serializers.SerializerMethodField()
+    applicant_name = serializers.CharField(read_only=True)
+    document_count = serializers.IntegerField(source="documents.count", read_only=True)
+
+    class Meta:
+        model = AdmissionApplication
+        fields = (
+            "id",
+            "campus",
+            "campus_name",
+            "form_template",
+            "form_name",
+            "target_section",
+            "section_label",
+            "application_number",
+            "tracking_code",
+            "applicant_first_name",
+            "applicant_last_name",
+            "applicant_name",
+            "date_of_birth",
+            "guardian_name",
+            "contact_email",
+            "contact_phone",
+            "form_data",
+            "status",
+            "admission_fee_amount",
+            "payment_status",
+            "payment_reference",
+            "interview_at",
+            "decision_note",
+            "admitted_student",
+            "reviewed_by",
+            "created_by",
+            "document_count",
+            "created_at",
+            "updated_at",
+        )
+        read_only_fields = ("application_number", "tracking_code", "reviewed_by", "created_by", "created_at", "updated_at")
+
+    def get_section_label(self, obj: AdmissionApplication) -> str:
+        if not obj.target_section:
+            return ""
+        return f"{obj.target_section.grade_name} - {obj.target_section.section_name}"
+
+    def validate(self, attrs):
+        campus = attrs.get("campus", getattr(self.instance, "campus", None))
+        form_template = attrs.get("form_template", getattr(self.instance, "form_template", None))
+        target_section = attrs.get("target_section", getattr(self.instance, "target_section", None))
+        admitted_student = attrs.get("admitted_student", getattr(self.instance, "admitted_student", None))
+        fee = attrs.get("admission_fee_amount", getattr(self.instance, "admission_fee_amount", Decimal("0")))
+        if campus and form_template and form_template.campus_id != campus.id:
+            raise serializers.ValidationError({"form_template": "Admission form must belong to the selected campus."})
+        if campus and target_section and target_section.campus_id != campus.id:
+            raise serializers.ValidationError({"target_section": "Target class must belong to the selected campus."})
+        if campus and admitted_student and admitted_student.campus_id != campus.id:
+            raise serializers.ValidationError({"admitted_student": "Admitted student must belong to the selected campus."})
+        if fee < 0:
+            raise serializers.ValidationError({"admission_fee_amount": "Admission fee cannot be negative."})
+        return attrs
+
+
+class AdmissionDocumentSerializer(serializers.ModelSerializer):
+    application_number = serializers.CharField(source="application.application_number", read_only=True)
+    campus = serializers.IntegerField(source="application.campus_id", read_only=True)
+    campus_name = serializers.CharField(source="application.campus.name", read_only=True)
+
+    class Meta:
+        model = AdmissionDocument
+        fields = (
+            "id",
+            "application",
+            "application_number",
+            "campus",
+            "campus_name",
+            "title",
+            "document_type",
+            "file_url",
+            "file_name",
+            "file_content_type",
+            "uploaded_by",
+            "created_at",
+            "updated_at",
+        )
+        read_only_fields = ("uploaded_by", "created_at", "updated_at")
+
+
+class TransportDriverSerializer(serializers.ModelSerializer):
+    campus_name = serializers.CharField(source="campus.name", read_only=True)
+    user_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = TransportDriver
+        fields = ("id", "campus", "campus_name", "user", "user_name", "full_name", "phone", "license_number", "emergency_contact", "status", "created_by", "created_at", "updated_at")
+        read_only_fields = ("created_by", "created_at", "updated_at")
+
+    def get_user_name(self, obj: TransportDriver) -> str:
+        if not obj.user:
+            return ""
+        return obj.user.get_full_name() or obj.user.username
+
+    def validate(self, attrs):
+        campus = attrs.get("campus", getattr(self.instance, "campus", None))
+        user = attrs.get("user", getattr(self.instance, "user", None))
+        if campus and user and user.school_id and user.school_id != campus.id:
+            raise serializers.ValidationError({"user": "Driver user must belong to the selected campus."})
+        return attrs
+
+
+class TransportVehicleAttendanceSerializer(serializers.ModelSerializer):
+    campus_name = serializers.CharField(source="campus.name", read_only=True)
+    vehicle_number = serializers.CharField(source="vehicle.vehicle_number", read_only=True)
+    driver_name = serializers.CharField(source="driver.full_name", read_only=True)
+
+    class Meta:
+        model = TransportVehicleAttendance
+        fields = ("id", "campus", "campus_name", "vehicle", "vehicle_number", "driver", "driver_name", "date", "status", "odometer_reading", "notes", "marked_by", "created_at", "updated_at")
+        read_only_fields = ("marked_by", "created_at", "updated_at")
+
+    def validate(self, attrs):
+        campus = attrs.get("campus", getattr(self.instance, "campus", None))
+        vehicle = attrs.get("vehicle", getattr(self.instance, "vehicle", None))
+        driver = attrs.get("driver", getattr(self.instance, "driver", None))
+        if campus and vehicle and vehicle.campus_id != campus.id:
+            raise serializers.ValidationError({"vehicle": "Vehicle must belong to the selected campus."})
+        if campus and driver and driver.campus_id != campus.id:
+            raise serializers.ValidationError({"driver": "Driver must belong to the selected campus."})
+        return attrs
+
+
+class TransportTripLogSerializer(serializers.ModelSerializer):
+    campus_name = serializers.CharField(source="campus.name", read_only=True)
+    route_name = serializers.CharField(source="route.name", read_only=True)
+    vehicle_number = serializers.CharField(source="vehicle.vehicle_number", read_only=True)
+    driver_name = serializers.CharField(source="driver.full_name", read_only=True)
+
+    class Meta:
+        model = TransportTripLog
+        fields = ("id", "campus", "campus_name", "route", "route_name", "vehicle", "vehicle_number", "driver", "driver_name", "trip_date", "trip_type", "status", "scheduled_time", "started_at", "completed_at", "gps_payload", "pickup_drop_report", "created_by", "created_at", "updated_at")
+        read_only_fields = ("created_by", "created_at", "updated_at")
+
+    def validate(self, attrs):
+        campus = attrs.get("campus", getattr(self.instance, "campus", None))
+        route = attrs.get("route", getattr(self.instance, "route", None))
+        vehicle = attrs.get("vehicle", getattr(self.instance, "vehicle", None))
+        driver = attrs.get("driver", getattr(self.instance, "driver", None))
+        if campus and route and route.campus_id != campus.id:
+            raise serializers.ValidationError({"route": "Route must belong to the selected campus."})
+        if campus and vehicle and vehicle.campus_id != campus.id:
+            raise serializers.ValidationError({"vehicle": "Vehicle must belong to the selected campus."})
+        if campus and driver and driver.campus_id != campus.id:
+            raise serializers.ValidationError({"driver": "Driver must belong to the selected campus."})
+        return attrs
+
+
+class DigitalLibraryResourceSerializer(serializers.ModelSerializer):
+    campus_name = serializers.CharField(source="campus.name", read_only=True)
+    book_title = serializers.CharField(source="book.title", read_only=True)
+
+    class Meta:
+        model = DigitalLibraryResource
+        fields = ("id", "campus", "campus_name", "book", "book_title", "title", "resource_type", "file_url", "file_name", "file_content_type", "status", "created_by", "created_at", "updated_at")
+        read_only_fields = ("created_by", "created_at", "updated_at")
+
+    def validate(self, attrs):
+        campus = attrs.get("campus", getattr(self.instance, "campus", None))
+        book = attrs.get("book", getattr(self.instance, "book", None))
+        if campus and book and book.campus_id != campus.id:
+            raise serializers.ValidationError({"book": "Book must belong to the selected campus."})
+        return attrs
+
+
+class LibraryBookRequestSerializer(serializers.ModelSerializer):
+    campus_name = serializers.CharField(source="campus.name", read_only=True)
+    book_title = serializers.CharField(source="book.title", read_only=True)
+    requester_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = LibraryBookRequest
+        fields = ("id", "campus", "campus_name", "book", "book_title", "student", "staff_user", "requester_name", "status", "request_note", "decision_note", "decided_by", "created_at", "updated_at")
+        read_only_fields = ("decided_by", "created_at", "updated_at")
+
+    def get_requester_name(self, obj: LibraryBookRequest) -> str:
+        if obj.student_id:
+            return obj.student.full_name
+        if obj.staff_user_id:
+            return obj.staff_user.get_full_name() or obj.staff_user.username
+        return ""
+
+    def validate(self, attrs):
+        campus = attrs.get("campus", getattr(self.instance, "campus", None))
+        book = attrs.get("book", getattr(self.instance, "book", None))
+        student = attrs.get("student", getattr(self.instance, "student", None))
+        staff_user = attrs.get("staff_user", getattr(self.instance, "staff_user", None))
+        if bool(student) == bool(staff_user):
+            raise serializers.ValidationError({"student": "Select exactly one requester: student or staff user."})
+        if campus and book and book.campus_id != campus.id:
+            raise serializers.ValidationError({"book": "Book must belong to the selected campus."})
+        if campus and student and student.campus_id != campus.id:
+            raise serializers.ValidationError({"student": "Student must belong to the selected campus."})
+        if staff_user and staff_user.role == UserRole.STUDENT:
+            raise serializers.ValidationError({"staff_user": "Use the student requester field for student users."})
+        return attrs
+
+
+class InventoryAssetSerializer(serializers.ModelSerializer):
+    campus_name = serializers.CharField(source="campus.name", read_only=True)
+    allocated_to_user_name = serializers.SerializerMethodField()
+    allocated_to_student_name = serializers.CharField(source="allocated_to_student.full_name", read_only=True)
+
+    class Meta:
+        model = InventoryAsset
+        fields = ("id", "campus", "campus_name", "asset_code", "name", "category", "serial_number", "location", "allocated_to_user", "allocated_to_user_name", "allocated_to_student", "allocated_to_student_name", "purchase_date", "purchase_cost", "current_value", "depreciation_rate", "status", "metadata", "created_by", "created_at", "updated_at")
+        read_only_fields = ("created_by", "created_at", "updated_at")
+
+    def get_allocated_to_user_name(self, obj: InventoryAsset) -> str:
+        if not obj.allocated_to_user:
+            return ""
+        return obj.allocated_to_user.get_full_name() or obj.allocated_to_user.username
+
+    def validate(self, attrs):
+        campus = attrs.get("campus", getattr(self.instance, "campus", None))
+        user = attrs.get("allocated_to_user", getattr(self.instance, "allocated_to_user", None))
+        student = attrs.get("allocated_to_student", getattr(self.instance, "allocated_to_student", None))
+        if campus and user and user.school_id and user.school_id != campus.id:
+            raise serializers.ValidationError({"allocated_to_user": "Allocated user must belong to the selected campus."})
+        if campus and student and student.campus_id != campus.id:
+            raise serializers.ValidationError({"allocated_to_student": "Allocated student must belong to the selected campus."})
+        return attrs
+
+
+class AssetMaintenanceLogSerializer(serializers.ModelSerializer):
+    campus_name = serializers.CharField(source="campus.name", read_only=True)
+    asset_code = serializers.CharField(source="asset.asset_code", read_only=True)
+
+    class Meta:
+        model = AssetMaintenanceLog
+        fields = ("id", "campus", "campus_name", "asset", "asset_code", "issue", "service_provider", "maintenance_date", "cost", "status", "notes", "created_by", "created_at", "updated_at")
+        read_only_fields = ("created_by", "created_at", "updated_at")
+
+    def validate(self, attrs):
+        campus = attrs.get("campus", getattr(self.instance, "campus", None))
+        asset = attrs.get("asset", getattr(self.instance, "asset", None))
+        if campus and asset and asset.campus_id != campus.id:
+            raise serializers.ValidationError({"asset": "Asset must belong to the selected campus."})
+        return attrs
+
+
+class SchoolWebsiteContentSerializer(serializers.ModelSerializer):
+    campus_name = serializers.CharField(source="campus.name", read_only=True)
+
+    class Meta:
+        model = SchoolWebsiteContent
+        fields = ("id", "campus", "campus_name", "content_type", "title", "slug", "body", "summary", "media_url", "metadata", "publish_at", "is_published", "sort_order", "created_by", "created_at", "updated_at")
+        read_only_fields = ("created_by", "created_at", "updated_at")
+
+
+class PushNotificationDeviceSerializer(serializers.ModelSerializer):
+    campus_name = serializers.CharField(source="campus.name", read_only=True)
+    user_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = PushNotificationDevice
+        fields = ("id", "campus", "campus_name", "user", "user_name", "platform", "device_id", "token", "is_active", "last_seen_at", "created_at", "updated_at")
+        read_only_fields = ("last_seen_at", "created_at", "updated_at")
+        extra_kwargs = {"token": {"write_only": True}}
+
+    def get_user_name(self, obj: PushNotificationDevice) -> str:
+        return obj.user.get_full_name() or obj.user.username
+
+
+class PushNotificationLogSerializer(serializers.ModelSerializer):
+    campus_name = serializers.CharField(source="campus.name", read_only=True)
+    user_name = serializers.SerializerMethodField()
+    student_name = serializers.CharField(source="student.full_name", read_only=True)
+
+    class Meta:
+        model = PushNotificationLog
+        fields = ("id", "campus", "campus_name", "user", "user_name", "student", "student_name", "event_type", "title", "body", "payload", "status", "sent_at", "error_message", "created_by", "created_at", "updated_at")
+        read_only_fields = ("sent_at", "created_by", "created_at", "updated_at")
+
+    def get_user_name(self, obj: PushNotificationLog) -> str:
+        if not obj.user:
+            return ""
+        return obj.user.get_full_name() or obj.user.username
+
+
+class MarketplacePluginSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = MarketplacePlugin
+        fields = ("id", "code", "name", "plugin_type", "provider_name", "description", "config_schema", "is_enabled", "created_by", "created_at", "updated_at")
+        read_only_fields = ("created_by", "created_at", "updated_at")
+
+
+class SchoolPluginConfigSerializer(serializers.ModelSerializer):
+    campus_name = serializers.CharField(source="campus.name", read_only=True)
+    plugin_name = serializers.CharField(source="plugin.name", read_only=True)
+    plugin_type = serializers.CharField(source="plugin.plugin_type", read_only=True)
+
+    class Meta:
+        model = SchoolPluginConfig
+        fields = ("id", "campus", "campus_name", "plugin", "plugin_name", "plugin_type", "is_enabled", "config", "created_by", "created_at", "updated_at")
+        read_only_fields = ("created_by", "created_at", "updated_at")
+
+
+class AccountingLedgerEntrySerializer(serializers.ModelSerializer):
+    campus_name = serializers.CharField(source="campus.name", read_only=True)
+
+    class Meta:
+        model = AccountingLedgerEntry
+        fields = ("id", "campus", "campus_name", "entry_type", "ledger_name", "reference_type", "reference_id", "amount", "tax_rate", "gst_amount", "entry_date", "notes", "created_by", "created_at", "updated_at")
+        read_only_fields = ("created_by", "created_at", "updated_at")
+
+
+class ReportDefinitionSerializer(serializers.ModelSerializer):
+    campus_name = serializers.CharField(source="campus.name", read_only=True)
+
+    class Meta:
+        model = ReportDefinition
+        fields = ("id", "campus", "campus_name", "name", "report_type", "description", "columns", "filters", "sort", "chart_config", "is_public_to_school", "created_by", "created_at", "updated_at")
+        read_only_fields = ("created_by", "created_at", "updated_at")
+
+
+class SecurityPolicySerializer(serializers.ModelSerializer):
+    campus_name = serializers.CharField(source="campus.name", read_only=True)
+
+    class Meta:
+        model = SecurityPolicy
+        fields = ("id", "campus", "campus_name", "two_factor_required", "allowed_ip_ranges", "blocked_ip_ranges", "max_active_sessions", "force_password_change_days", "suspicious_login_threshold", "created_by", "created_at", "updated_at")
+        read_only_fields = ("created_by", "created_at", "updated_at")
+
+
+class DeviceLoginSessionSerializer(serializers.ModelSerializer):
+    campus_name = serializers.CharField(source="campus.name", read_only=True)
+    user_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = DeviceLoginSession
+        fields = ("id", "campus", "campus_name", "user", "user_name", "device_id", "ip_address", "user_agent", "login_at", "logout_at", "is_active", "forced_logout", "risk_score", "event_type", "metadata", "created_at", "updated_at")
+        read_only_fields = ("created_at", "updated_at")
+
+    def get_user_name(self, obj: DeviceLoginSession) -> str:
+        return obj.user.get_full_name() or obj.user.username
+
+
+class SecurityEventSerializer(serializers.ModelSerializer):
+    campus_name = serializers.CharField(source="campus.name", read_only=True)
+    user_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = SecurityEvent
+        fields = ("id", "campus", "campus_name", "user", "user_name", "event_type", "severity", "summary", "ip_address", "metadata", "resolved_at", "resolved_by", "created_at", "updated_at")
+        read_only_fields = ("resolved_at", "resolved_by", "created_at", "updated_at")
+
+    def get_user_name(self, obj: SecurityEvent) -> str:
+        if not obj.user:
+            return ""
+        return obj.user.get_full_name() or obj.user.username
+
+
+class ProductionAuditRunSerializer(serializers.ModelSerializer):
+    campus_name = serializers.CharField(source="campus.name", read_only=True)
+
+    class Meta:
+        model = ProductionAuditRun
+        fields = ("id", "campus", "campus_name", "status", "checks", "summary", "report_url", "started_at", "completed_at", "created_by", "created_at", "updated_at")
+        read_only_fields = ("status", "checks", "summary", "report_url", "started_at", "completed_at", "created_by", "created_at", "updated_at")

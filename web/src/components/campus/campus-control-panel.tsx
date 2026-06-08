@@ -820,7 +820,7 @@ export function CampusControlPanel() {
     void load();
   }, [load]);
 
-  const staffUsers = useMemo(() => users.filter((user) => user.role === "teacher" || user.role === "admin"), [users]);
+  const staffUsers = useMemo(() => users.filter((user) => user.role === "teacher" || user.role === "school_admin"), [users]);
   const isSuperAdmin = user?.role === "super_admin";
   const activeDevices = devices.filter((device) => device.status === "active").length;
   const activeSubjectAllocations = subjectAllocations.filter((allocation) => allocation.is_active).length;

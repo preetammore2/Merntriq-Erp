@@ -15,7 +15,7 @@ class HasRole(BasePermission):
 
 
 class IsAdminUserRole(HasRole):
-    allowed_roles = (UserRole.SUPER_ADMIN, UserRole.ADMIN)
+    allowed_roles = (UserRole.SUPER_ADMIN, UserRole.SCHOOL_ADMIN)
 
 
 class IsAccountUserRole(HasRole):

@@ -1,22 +1,11 @@
-from pathlib import Path
+from .production import *  # noqa: F403,F401
 
-from .base import *  # noqa: F403,F401
+ALLOWED_HOSTS = env.list(  # noqa: F405
+    "DJANGO_ALLOWED_HOSTS",
+    default=[".vercel.app", "localhost", "127.0.0.1"],
+)
+CORS_ALLOWED_ORIGINS = env.list("DJANGO_CORS_ALLOWED_ORIGINS", default=[])  # noqa: F405
+CSRF_TRUSTED_ORIGINS = env.list("DJANGO_CSRF_TRUSTED_ORIGINS", default=[])  # noqa: F405
 
-DEBUG = False
-
-ALLOWED_HOSTS = [".vercel.app", "localhost", "127.0.0.1"]
-CORS_ALLOW_ALL_ORIGINS = True
-
-DATABASES = {
-    "default": {
-        "ENGINE": "django.db.backends.sqlite3",
-        "NAME": Path("/tmp") / "mentriq360-vercel.sqlite3",
-    }
-}
-
-SESSION_COOKIE_SECURE = True
-CSRF_COOKIE_SECURE = True
-SECURE_BROWSER_XSS_FILTER = True
-SECURE_CONTENT_TYPE_NOSNIFF = True
-SECURE_SSL_REDIRECT = False
-X_FRAME_OPTIONS = "DENY"
+# Vercel terminates TLS before invoking the Python runtime.
+SECURE_SSL_REDIRECT = env.bool("DJANGO_SECURE_SSL_REDIRECT", default=False)  # noqa: F405

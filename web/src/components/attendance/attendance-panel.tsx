@@ -34,6 +34,8 @@ import { WorkspacePlaceholder } from "@/components/ui/workspace-placeholder";
 const STATUS_OPTIONS: { value: AttendanceStatus; label: string; colour: string }[] = [
   { value: "present", label: "Present", colour: "bg-emerald-500 text-white hover:bg-emerald-600" },
   { value: "absent", label: "Absent", colour: "bg-rose-500 text-white hover:bg-rose-600" },
+  { value: "late", label: "Late", colour: "bg-amber-500 text-white hover:bg-amber-600" },
+  { value: "half_day", label: "Half Day", colour: "bg-violet-600 text-white hover:bg-violet-700" },
   { value: "on_duty", label: "On Duty", colour: "bg-blue-600 text-white hover:bg-blue-700" },
 ];
 
@@ -87,7 +89,7 @@ export function AttendancePanel() {
         const allocationArr = asArray<TeacherSubjectAllocation>(a);
         const teacherSectionIds = new Set(allocationArr.map((allocation) => allocation.section));
         const visibleSections = isTeacher
-          ? arr.filter((section) => teacherSectionIds.has(section.id))
+          ? arr.filter((section) => section.class_teacher === user?.id || teacherSectionIds.has(section.id))
           : arr;
         setSections(visibleSections);
         setDevices(deviceArr);
@@ -100,12 +102,17 @@ export function AttendancePanel() {
       })
       .catch(() => setError("Failed to load sections, teacher subjects, or attendance devices."))
       .finally(() => setLoading(false));
-  }, [isTeacher]);
+  }, [isTeacher, user?.id]);
 
   const subjectOptions = useMemo(() => {
     if (!selectedSection) return [];
     return allocations.filter((allocation) => allocation.section === selectedSection && allocation.is_active);
   }, [allocations, selectedSection]);
+  const selectedSectionInfo = useMemo(
+    () => sections.find((section) => section.id === selectedSection),
+    [sections, selectedSection]
+  );
+  const teacherNeedsSubject = Boolean(isTeacher && selectedSectionInfo?.class_teacher !== user?.id);
 
   useEffect(() => {
     if (!isTeacher) {
@@ -128,7 +135,7 @@ export function AttendancePanel() {
       setMarkMap({});
       return;
     }
-    if (isTeacher && !selectedSubject) {
+    if (teacherNeedsSubject && !selectedSubject) {
       setStudents([]);
       setMarkMap({});
       return;
@@ -154,7 +161,7 @@ export function AttendancePanel() {
     } finally {
       setLoading(false);
     }
-  }, [isTeacher, selectedSection, selectedSubject, date]);
+  }, [isTeacher, selectedSection, selectedSubject, date, teacherNeedsSubject]);
 
   useEffect(() => { loadData(); }, [loadData]);
 
@@ -171,7 +178,7 @@ export function AttendancePanel() {
   async function saveAttendance() {
     if (!selectedSection) return;
     const activeSubject = isTeacher ? selectedSubject.trim() : "";
-    if (isTeacher && !activeSubject) {
+    if (teacherNeedsSubject && !activeSubject) {
       setError("Select an allotted subject before saving attendance.");
       return;
     }
@@ -212,7 +219,6 @@ export function AttendancePanel() {
   const markedCount = Object.keys(markMap).length;
   const presentCount = Object.values(markMap).filter((v) => v === "present").length;
   const absentCount = Object.values(markMap).filter((v) => v === "absent").length;
-  const selectedSectionInfo = sections.find((section) => section.id === selectedSection);
   const selectedAllocation = subjectOptions.find((allocation) => allocation.subject === selectedSubject);
   const campusDevices = devices.filter((device) => {
     if (!selectedSectionInfo) return device.is_enabled_for_students;
@@ -222,8 +228,8 @@ export function AttendancePanel() {
   const currentDate = todayISO();
   const attendanceLocked = date < earliestEditableDate || date > currentDate;
   const teacherHasNoAllotments = Boolean(isTeacher && sections.length === 0);
-  const teacherSubjectMissing = Boolean(isTeacher && selectedSection && subjectOptions.length === 0);
-  const markingDisabled = attendanceLocked || teacherHasNoAllotments || teacherSubjectMissing || (isTeacher && !selectedSubject);
+  const teacherSubjectMissing = Boolean(teacherNeedsSubject && selectedSection && subjectOptions.length === 0);
+  const markingDisabled = attendanceLocked || teacherHasNoAllotments || teacherSubjectMissing || (teacherNeedsSubject && !selectedSubject);
   const saveDisabled = saving || markedCount === 0 || markingDisabled;
 
   return (

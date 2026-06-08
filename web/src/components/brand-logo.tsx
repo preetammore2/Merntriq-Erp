@@ -6,7 +6,7 @@ export function BrandLogo({
   size = "md",
   logoUrl,
   label = "Mentriq360",
-  subtitle = "Campus ERP",
+  subtitle = "School ERP",
   animated = false,
 }: {
   compact?: boolean;

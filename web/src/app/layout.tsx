@@ -6,7 +6,7 @@ import "./globals.css";
 export const metadata: Metadata = {
   metadataBase: new URL(process.env.NEXT_PUBLIC_SITE_URL ?? "http://localhost:3000"),
   title: "Mentriq360 ERP",
-  description: "Role-based campus ERP for admissions, attendance, academics, results, resources, admit cards, fees, and reporting.",
+  description: "Role-based school ERP for admissions, attendance, academics, results, resources, admit cards, fees, and reporting.",
   applicationName: "Mentriq360 ERP",
   manifest: "/manifest.json",
   icons: {
@@ -20,7 +20,7 @@ export const metadata: Metadata = {
   },
   openGraph: {
     title: "Mentriq360 ERP",
-    description: "Role-based campus ERP for admissions, attendance, academics, fees, operations, and reporting.",
+    description: "Role-based school ERP for admissions, attendance, academics, fees, operations, and reporting.",
     images: ["/icon-512.png"],
   },
   appleWebApp: {
@@ -42,7 +42,7 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en">
+    <html lang="en" data-scroll-behavior="smooth">
       <body className="bg-page antialiased">
         <AuthProvider>{children}</AuthProvider>
       </body>

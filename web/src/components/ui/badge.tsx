@@ -36,6 +36,7 @@ export function statusBadge(status: string): Variant {
     absent: "danger",
     overdue: "danger",
     late: "warning",
+    half_day: "warning",
     on_duty: "info",
     partial: "warning",
     pending: "info",

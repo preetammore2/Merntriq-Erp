@@ -41,7 +41,7 @@ import { Badge, statusBadge } from "@/components/ui/badge";
 import { WorkspacePlaceholder } from "@/components/ui/workspace-placeholder";
 
 type OverviewTab = "dashboard" | "records" | "attendance" | "operations" | "academics" | "finance" | "reports";
-type AllowedTab = OverviewTab | "modules" | "campus" | "fees" | "student";
+type AllowedTab = OverviewTab | "modules" | "campus" | "fees" | "student" | "schools" | "students" | "staff" | "classes" | "exams" | "notices" | "realtime";
 
 function asArray<T>(value: T[] | { results?: T[] }): T[] {
   return Array.isArray(value) ? value : value.results ?? [];
@@ -133,7 +133,7 @@ export function InstitutionOverview({
           learningResourceApi.list(),
           resultRecordApi.list(),
           admitCardApi.list(),
-          role === "admin" || role === "super_admin" ? userApi.list() : Promise.resolve([] as ERPUser[]),
+          role === "school_admin" || role === "super_admin" ? userApi.list() : Promise.resolve([] as ERPUser[]),
         ]);
 
         const sessionList = asArray(sessionRes);
@@ -147,7 +147,7 @@ export function InstitutionOverview({
         setResults(asArray(resultRes));
         setAdmitCards(asArray(admitRes));
 
-        if ((role === "teacher" || role === "admin" || role === "super_admin") && !summaryRes.students.total && studentList.length) {
+        if ((role === "teacher" || role === "school_admin" || role === "super_admin") && !summaryRes.students.total && studentList.length) {
           setSummary({
             ...summaryRes,
             students: {
@@ -207,7 +207,7 @@ export function InstitutionOverview({
         }
     : role === "super_admin"
       ? {
-          label: "Director workspace",
+          label: "Super Admin workspace",
           title: "Institution control",
           action: "Open Dashboard",
         }

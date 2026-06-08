@@ -151,7 +151,7 @@ function StudentForm({
   studentUsers: ERPUser[];
   initial?: Student;
   selectedCampusId?: string;
-  onSave: (data: Omit<Student, "id" | "full_name">) => Promise<void>;
+  onSave: (data: Partial<Student> & { campus: number; section: number; first_name: string; date_of_birth: string }) => Promise<void>;
   onCancel: () => void;
 }) {
   const defaultCampus = initial?.campus ?? (selectedCampusId && selectedCampusId !== "all" ? Number(selectedCampusId) : campuses[0]?.id);
@@ -537,6 +537,7 @@ function UserForm({
   });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const isProtectedSuperAdmin = initial?.role === "super_admin";
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
@@ -549,6 +550,8 @@ function UserForm({
       }
       const payload = {
         ...form,
+        role: isProtectedSuperAdmin ? "super_admin" as UserRole : form.role,
+        is_active: isProtectedSuperAdmin ? true : form.is_active,
         campus_ids: form.role === "super_admin" ? [] : form.campus_ids.map(Number),
       };
       if (!payload.password) delete (payload as Partial<typeof payload>).password;
@@ -571,9 +574,14 @@ function UserForm({
           <input className={inputCls} value={form.username} onChange={(e) => setForm((f) => ({ ...f, username: e.target.value }))} required />
         </Field>
         <Field label="Role *">
-          <select className={inputCls} value={form.role} onChange={(e) => setForm((f) => ({ ...f, role: e.target.value as UserRole }))}>
+          <select
+            className={inputCls}
+            value={form.role}
+            onChange={(e) => setForm((f) => ({ ...f, role: e.target.value as UserRole }))}
+            disabled={isProtectedSuperAdmin}
+          >
             {allowSuperAdmin && <option value="super_admin">Super Admin</option>}
-            <option value="admin">School Admin</option>
+            <option value="school_admin">School Admin</option>
             <option value="account">Account</option>
             <option value="teacher">Teacher</option>
             <option value="student">Student</option>
@@ -589,7 +597,12 @@ function UserForm({
           <input type="password" className={inputCls} value={form.password} onChange={(e) => setForm((f) => ({ ...f, password: e.target.value }))} required={!initial} minLength={8} />
         </Field>
         <label className="flex items-center gap-2 text-sm font-medium text-ink">
-          <input type="checkbox" checked={form.is_active} onChange={(e) => setForm((f) => ({ ...f, is_active: e.target.checked }))} />
+          <input
+            type="checkbox"
+            checked={isProtectedSuperAdmin || form.is_active}
+            onChange={(e) => setForm((f) => ({ ...f, is_active: e.target.checked }))}
+            disabled={isProtectedSuperAdmin}
+          />
           Active user
         </label>
 
@@ -734,7 +747,12 @@ function UserDetailModal({
         <div className="space-y-5 max-h-[70vh] overflow-y-auto pr-1">
           {/* Header */}
           <div className="flex items-center gap-4 rounded-2xl bg-gradient-to-r from-slate-50 to-teal-50 p-5">
-            <img src={avatarUrl} alt={detail.full_name} className="h-16 w-16 rounded-2xl border-2 border-white shadow-md object-cover" />
+            <span
+              role="img"
+              aria-label={detail.full_name || detail.username}
+              className="h-16 w-16 rounded-2xl border-2 border-white bg-slate-100 bg-cover bg-center shadow-md"
+              style={{ backgroundImage: `url(${JSON.stringify(avatarUrl)})` }}
+            />
             <div className="flex-1 min-w-0">
               <h3 className="text-lg font-bold text-ink truncate">{detail.full_name || detail.username}</h3>
               <p className="text-sm text-muted">@{detail.username}</p>
@@ -1695,7 +1713,12 @@ export function AdminDashboard() {
                   return (
                     <tr key={u.id} className="border-b border-line/40 hover:bg-slate-50/60">
                       <td className="px-4 py-3">
-                        <img src={avatarUrl} alt={u.full_name} className="h-9 w-9 rounded-xl border border-line/40 object-cover" />
+                        <span
+                          role="img"
+                          aria-label={u.full_name || u.username}
+                          className="block h-9 w-9 rounded-xl border border-line/40 bg-slate-100 bg-cover bg-center"
+                          style={{ backgroundImage: `url(${JSON.stringify(avatarUrl)})` }}
+                        />
                       </td>
                       <td className="px-4 py-3">
                         <p className="font-semibold text-ink">{u.full_name || u.username}</p>
@@ -1722,9 +1745,11 @@ export function AdminDashboard() {
                           <button type="button" onClick={() => openModal("users", u)} className="rounded-xl border border-line/70 px-2.5 py-1.5 text-xs font-medium text-ink transition hover:bg-slate-100">
                             Edit
                           </button>
-                          <button type="button" onClick={() => removeRecord("users", u.id)} className="flex items-center gap-1 rounded-xl border border-rose-200 px-2.5 py-1.5 text-xs font-medium text-rose-600 transition hover:bg-rose-50">
-                            <Trash2 size={12} />
-                          </button>
+                          {u.role !== "super_admin" && (
+                            <button type="button" onClick={() => removeRecord("users", u.id)} className="flex items-center gap-1 rounded-xl border border-rose-200 px-2.5 py-1.5 text-xs font-medium text-rose-600 transition hover:bg-rose-50" aria-label={`Delete ${u.username}`}>
+                              <Trash2 size={12} />
+                            </button>
+                          )}
                         </div>
                       </td>
                     </tr>

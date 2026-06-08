@@ -1,6 +1,6 @@
-# Mentriq360 Campus ERP
+# Mentriq360 School ERP
 
-Mentriq360 is a role-based campus ERP built from the supplied ER/user-flow diagram. It covers authentication, admin setup, student records, teacher attendance, fee assignment, payment entry, reporting, audit logs, student visibility, and optional campus-isolated databases.
+Mentriq360 is a role-based, multi-tenant School ERP covering Super Admin school setup, School Admin core modules, finance and payment workflows, Teacher panel, Student portal, real-time academic/finance events, AI-assisted tools, communication settings, attendance hardware readiness, production deployment controls, client handover documentation, and enterprise SaaS management.
 
 ## Stack
 
@@ -14,17 +14,20 @@ Mentriq360 is a role-based campus ERP built from the supplied ER/user-flow diagr
 ## Implemented Modules
 
 - Authentication: JWT login, refresh, current user, role-aware dashboard routing
-- User management: admin-managed users for admins, teachers, finance teams, and students
+- User management: admin-managed users for School Admin, Account, Teacher, and Student roles
 - Academic setup: campuses, academic sessions, class sections, class teachers
 - Student module: admission records, section assignment, status tracking
 - Attendance: teacher section roster, bulk attendance upsert, and student read-only reports
 - Fees and payments: fee assignment, payment capture, automatic paid/partial/pending/overdue status refresh
 - Reports: dashboard summary, attendance by section, fee status, recent payments
 - Notifications and support: admin announcements, role-visible alerts, and user support tickets for super admins
-- Campus360 modules: a role-aware suite view covering admissions, SIS, staff, fees, exams, certificates, homework, timetable, library, transport, hostel, inventory, communication, online learning, analytics, director dashboard, and security
+- Role dashboards: protected dashboards for Super Admin, School Admin, Account, Teacher, and Student users
 - Multi-tenant database routing: optional `X-Campus-Code` tenant context routes each configured campus to its own database alias
 - Security audit: login and write-action audit events
 - Production controls: installable web app manifest, session idle expiry, request timeouts, global error handling, Redis-backed throttling support, and scoped hardware attendance throttles
+- Client handover: removable demo school seed command, user manual, permission matrix, deployment guide, backup/recovery guide, maintenance guide, database schema summary, test report, and known limitations
+- Enterprise SaaS: Basic/Standard/Premium/Enterprise plans, school subscription billing, GST invoices, white-label controls, SaaS analytics, compliance logs, secure API tokens, backup jobs, queue jobs, health snapshots, and enterprise monitoring
+- Commercial ecosystem: admissions, transport drivers, digital library, inventory assets, school website content, mobile bootstrap, push notifications, marketplace plugins, GST ledger reports, report builder, security center, and production audit
 
 ## Local Run
 
@@ -39,7 +42,6 @@ python -m venv .backend-venv
 $env:DJANGO_USE_SQLITE='True'
 Set-Location backend
 ..\.backend-venv\Scripts\python.exe manage.py migrate
-..\.backend-venv\Scripts\python.exe manage.py createsuperuser
 ..\.backend-venv\Scripts\python.exe manage.py runserver 0.0.0.0:8000
 ```
 
@@ -60,7 +62,12 @@ Open:
 
 ## Authorized Accounts
 
-No default users or passwords are shipped with the ERP. Create the first Super Admin with `python manage.py createsuperuser`, then create School Admin, Account, Teacher, and Student users from the protected admin workspace.
+Migrations seed one permanent Super Admin account from `.env`:
+
+- Username: `MENTRIQ_SUPER_ADMIN_USERNAME` (default `super.admin`)
+- Password: `MENTRIQ_SUPER_ADMIN_PASSWORD` (default `SuperAdmin@12345`)
+
+The seeded Super Admin is always active, staff, and superuser. The API and admin protections block deleting or disabling Super Admin accounts. Create School Admin, Account, Teacher, and Student users from the protected dashboard.
 
 ## Campus Databases
 
@@ -113,6 +120,50 @@ pnpm lint
 pnpm build
 ```
 
+## Demo School
+
+Create a removable demo school for client walkthroughs:
+
+```powershell
+Set-Location backend
+python manage.py seed_demo_school
+```
+
+Default demo users use password `Demo@12345`. Remove the demo school and demo users with:
+
+```powershell
+python manage.py seed_demo_school --remove
+```
+
+The command refuses to remove a school unless it has the demo marker. See [Demo Data Guide](docs/demo-data.md).
+
+## Enterprise SaaS
+
+Phase 9 adds commercial SaaS management for Super Admins. Default subscription plans are seeded by migration and can be refreshed with:
+
+```powershell
+Set-Location backend
+python manage.py enterprise_maintenance --seed-plans
+```
+
+Run all subscription expiry, backup queueing, and health snapshot maintenance tasks with:
+
+```powershell
+python manage.py enterprise_maintenance --all
+```
+
+Use `Super Admin > Enterprise SaaS` in the web app to manage plan limits, school subscriptions, invoices, payments, white-label branding, analytics, compliance logs, backup/restore evidence, secure API tokens, queue jobs, and monitoring. See [Enterprise SaaS Guide](docs/enterprise-saas.md).
+
+## Commercial Ecosystem
+
+Phase 10 adds the final commercial ecosystem surface for Super Admins:
+
+- Public admissions with tracking, document upload, fee status, pipeline review, and admit-to-student conversion
+- Transport, digital library, inventory/assets, school website, mobile bootstrap, push notification, marketplace, GST/reporting, security center, and production audit APIs
+- `Super Admin > Commercial Ecosystem` web panel for school-scoped launch operations
+
+See [Phase 10 Commercial Ecosystem](docs/phase10-commercial-ecosystem.md).
+
 ## Capacitor Android App
 
 Capacitor is installed in the `web` workspace with an Android project at `web/android`.
@@ -158,4 +209,14 @@ The Compose stack starts PostgreSQL, Redis, the Django API, and the web app.
 - [API reference](docs/api.md)
 - [Security baseline](docs/security.md)
 - [Production readiness](docs/production-readiness.md)
-- [Campus360 access matrix](docs/campus360-access-matrix.md)
+- [Client handover](docs/client-handover.md)
+- [User manual](docs/user-manual.md)
+- [Demo data guide](docs/demo-data.md)
+- [Permission matrix](docs/permission-matrix.md)
+- [Deployment guide](docs/deployment-guide.md)
+- [Backup and recovery](docs/backup-recovery.md)
+- [Maintenance guide](docs/maintenance.md)
+- [Database schema](docs/database-schema.md)
+- [Final test report](docs/test-report.md)
+- [Phase 10 Commercial Ecosystem](docs/phase10-commercial-ecosystem.md)
+- [Known limitations](docs/known-limitations.md)

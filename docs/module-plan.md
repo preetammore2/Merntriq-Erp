@@ -19,7 +19,7 @@ Frontend:
 
 Outcome:
 
-- Admin, teacher, student, and parent users enter different workspaces after login.
+- Super Admin, School Admin, Account, Teacher, and Student users enter different protected dashboards after login.
 
 ## Phase 2: Admin Master Data
 
@@ -29,8 +29,6 @@ Backend:
 - `AcademicSession`
 - `ClassSection`
 - `Student`
-- `StudentGuardian`
-
 Frontend:
 
 - Admin dashboard
@@ -38,7 +36,7 @@ Frontend:
 - Academic session setup
 - Class and teacher assignment
 - Student admission form
-- Guardian contact details
+- Family contact details
 
 Outcome:
 
@@ -83,24 +81,22 @@ Outcome:
 
 - Admin users can assign fees, collect payments, and track dues.
 
-## Phase 5: Student and Parent Visibility
+## Phase 5: Student Visibility
 
 Backend:
 
 - Student-scoped querysets
 - Student, attendance, fee, and payment read access
-- Parent-scoped querysets through `StudentGuardian`
 
 Frontend:
 
 - Student profile
 - Attendance summary
 - Fee status and payment history
-- Family portal view for linked students
 
 Outcome:
 
-- Students view only their own records. Parents view only records linked through guardian relationships.
+- Students view only their own records.
 
 ## Phase 7: Operational Services
 
@@ -127,7 +123,7 @@ Frontend:
 
 Outcome:
 
-- Campus admins manage operational services while teachers, students, and parents receive scoped read access.
+- Campus admins manage operational services while teachers and students receive scoped read access.
 
 ## Phase 6: Reports and Audit
 
@@ -149,12 +145,40 @@ Outcome:
 
 - Admin users can monitor operational status and trace important write activity.
 
+## Phase 8: Client Handover and Demo Readiness
+
+Backend:
+
+- `seed_demo_school` management command
+- removable demo school marker
+- demo users for School Admin, Account, Teacher, and Student roles
+- sample classes, sections, subjects, fees, attendance, notes, assignments, results, notices, payment settings, communication settings, and device sync logs
+- regression coverage for demo seed and removal
+
+Documentation:
+
+- client handover index
+- user manual
+- demo data guide
+- permission matrix
+- deployment guide
+- backup and recovery guide
+- maintenance guide
+- database schema summary
+- API documentation handover
+- final test report
+- known limitations
+
+Outcome:
+
+- MentriQ360 is client-ready, demo-ready, documented, testable, maintainable, and prepared for final handover.
+
 ## Future ERP Expansion
 
 Recommended next modules:
 
 - Academic calendar conflict detection
 - Certificate and transfer certificate workflows
-- Notifications and parent messaging delivery providers
+- Notifications and messaging delivery providers
 - Inventory and procurement
 - Payroll and HR

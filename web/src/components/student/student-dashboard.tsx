@@ -9,22 +9,27 @@ import {
   CalendarDays,
   ChevronDown,
   ClipboardCheck,
-  ExternalLink,
+  Download,
   FileText,
   GraduationCap,
   MapPin,
   Printer,
   RefreshCcw,
   ReceiptText,
+  Upload,
+  Users,
   X,
   UserRound,
 } from "lucide-react";
 
 import {
+  academicEventApi,
   admitCardApi,
   announcementApi,
   assignedWorkApi,
+  assignmentSubmissionApi,
   attendanceApi,
+  documentApi,
   feeApi,
   learningResourceApi,
   paymentApi,
@@ -32,20 +37,24 @@ import {
   resultRecordApi,
   studentApi,
   ApiError,
+  type AcademicEvent,
   type AdmitCard,
   type Announcement,
+  type AssignmentSubmission,
   type AssignedWork,
   type AttendanceRecord,
+  type DocumentRecord,
   type FeeAssignment,
   type LearningResource,
   type Payment,
+  type PaymentTransaction,
   type ResultRecord,
   type Student,
 } from "@/lib/api";
 import { Badge, statusBadge, statusLabel } from "@/components/ui/badge";
 import { WorkspacePlaceholder } from "@/components/ui/workspace-placeholder";
 
-type StudentView = "overview" | "profile" | "lms" | "fees" | "attendance" | "results" | "work" | "resources" | "admit" | "parent";
+type StudentView = "overview" | "profile" | "lms" | "fees" | "attendance" | "results" | "work" | "resources" | "notices" | "documents" | "parent" | "admit";
 
 const studentViews: {
   id: StudentView;
@@ -53,15 +62,17 @@ const studentViews: {
   icon: React.ComponentType<{ size?: number; className?: string }>;
 }[] = [
   { id: "overview", label: "Dashboard", icon: GraduationCap },
-  { id: "profile", label: "Student Information", icon: UserRound },
-  { id: "lms", label: "Select Course", icon: BookOpen },
-  { id: "fees", label: "Online Payment", icon: ReceiptText },
-  { id: "attendance", label: "Attendance Details", icon: ClipboardCheck },
-  { id: "results", label: "Result Details", icon: Award },
-  { id: "work", label: "Homework", icon: FileText },
-  { id: "resources", label: "Course Registered", icon: BadgeCheck },
+  { id: "profile", label: "My Profile", icon: UserRound },
+  { id: "attendance", label: "My Attendance", icon: ClipboardCheck },
+  { id: "fees", label: "My Fees", icon: ReceiptText },
+  { id: "resources", label: "My Notes", icon: BadgeCheck },
+  { id: "work", label: "My Assignments", icon: FileText },
+  { id: "results", label: "My Results", icon: Award },
+  { id: "notices", label: "My Notices", icon: Bell },
+  { id: "documents", label: "My Documents", icon: FileText },
+  { id: "parent", label: "Parent View", icon: Users },
+  { id: "lms", label: "Learning Center", icon: BookOpen },
   { id: "admit", label: "Admit Card", icon: BadgeCheck },
-  { id: "parent", label: "Parent View", icon: UserRound },
 ];
 
 function asArray<T>(value: T[] | { results?: T[] }): T[] {
@@ -89,6 +100,17 @@ function formatMoney(value?: string | number | null) {
   });
 }
 
+function downloadStudentBlob(blob: Blob, filename: string) {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
 function formatResourceType(value: string) {
   return value.replace("_", " ");
 }
@@ -114,14 +136,16 @@ function profileValue(value?: string | null) {
 function pageTitleFor(view: StudentView) {
   if (view === "overview") return "Student Dashboard";
   if (view === "profile") return "Student Complete Detail";
-  if (view === "lms") return "Select Course";
+  if (view === "lms") return "Learning Center";
   if (view === "fees") return "Online Payment";
   if (view === "attendance") return "Attendance Details";
   if (view === "results") return "Result Details";
   if (view === "work") return "Homework & Assignment";
-  if (view === "resources") return "Course Registered";
-  if (view === "admit") return "Admit Card";
+  if (view === "resources") return "Learning Resources";
+  if (view === "notices") return "My Notices";
+  if (view === "documents") return "My Documents";
   if (view === "parent") return "Parent View";
+  if (view === "admit") return "Admit Card";
   return "Student Dashboard";
 }
 
@@ -169,6 +193,7 @@ function StudentHomePage({
   visibleWork,
   visibleAdmitCards,
   notices,
+  events,
   setActiveView,
 }: {
   attendancePct: number;
@@ -178,6 +203,7 @@ function StudentHomePage({
   visibleWork: AssignedWork[];
   visibleAdmitCards: AdmitCard[];
   notices: Announcement[];
+  events: AcademicEvent[];
   setActiveView: (view: StudentView) => void;
 }) {
   return (
@@ -207,7 +233,7 @@ function StudentHomePage({
           </div>
           <div>
             <p className="text-4xl font-semibold text-ink">{visibleAdmitCards.length}</p>
-            <p className="text-sm text-muted">Announcements</p>
+            <p className="text-sm text-muted">Admit Cards</p>
           </div>
         </button>
       </section>
@@ -237,7 +263,7 @@ function StudentHomePage({
             {[
               ["Student Complete Detail", "profile"],
               ["Online Payment", "fees"],
-              ["Select Course", "lms"],
+              ["Learning Center", "lms"],
               ["Result Details", "results"],
             ].map(([label, view]) => (
               <button key={label} type="button" onClick={() => setActiveView(view as StudentView)} className="rounded-md border border-line/70 bg-white px-3 py-2 text-left text-sm font-medium text-accent hover:border-accent hover:bg-accent-soft hover:text-accent-strong">
@@ -310,38 +336,48 @@ function StudentHomePage({
           </div>
         </div>
       </section>
+
+      <section className="surface overflow-hidden shadow-soft">
+        <PanelHeader title="Latest Updates" icon={RefreshCcw} />
+        <div className="divide-y divide-line/60">
+          {events.slice(0, 5).map((event) => (
+            <button key={event.id} type="button" onClick={() => setActiveView("parent")} className="block w-full px-4 py-3 text-left">
+              <p className="text-sm font-semibold text-ink">{statusLabel(event.event_type)}</p>
+              <p className="mt-1 text-xs text-muted">{formatDate(event.created_at)}</p>
+            </button>
+          ))}
+          {!events.length && <p className="px-4 py-8 text-center text-sm text-muted">No live academic updates yet.</p>}
+        </div>
+      </section>
     </div>
   );
 }
 
 function StudentCompleteDetailPage({ student }: { student: Student }) {
   const detailRows = [
-    ["RRN No.", student.admission_number],
+    ["Admission No.", student.admission_number],
     ["Student Name", student.full_name],
     ["User Login Status", "Enabled"],
-    ["Admission Status", "Admitted"],
-    ["Current Student/Admission Status", "ADMISSION"],
-    ["User Last Login Details", "23-May-2026 07:38AM"],
+    ["Admission Status", student.status],
+    ["Current Student Status", student.status],
   ];
   const schoolRows = [
-    ["Admission Batch", "2024-25"],
+    ["Academic Year", "Current session"],
     ["School", student.campus_name || "MentriQ School"],
-    ["Degree/Branch", student.section_label || "Class / Section"],
-    ["Semester", "IV"],
-    ["Scheme", "School ERP Academic Session 2025-2026"],
+    ["Class / Section", student.section_label || "Class / Section"],
+    ["Admission Number", student.admission_number],
+    ["ERP Scheme", "School ERP Academic Session"],
   ];
   const sidebar = [
     "Student Information",
     "Personal Details",
     "Address Details",
-    "Qualification Details",
+    "Family Details",
     "Fees Details",
-    "Course Registered",
+    "Learning Resources",
     "Attendance Details",
     "Result Details",
-    "Revaluation Result Details",
-    "Internal Marks",
-    "Mentor-Mentee",
+    "Assignments",
   ];
 
   return (
@@ -385,14 +421,14 @@ function StudentCompleteDetailPage({ student }: { student: Student }) {
               <InfoRow label="Gender" value="Not added" />
               <InfoRow label="Father's Name" value={student.father_name} />
               <InfoRow label="Mother's Name" value={student.mother_name} />
-              <InfoRow label="RRNO" value={student.admission_number} />
+              <InfoRow label="Admission No." value={student.admission_number} />
             </div>
             <div>
               <InfoRow label="School/Institute Name" value={student.campus_name || "MentriQ School"} />
-              <InfoRow label="Degree" value={student.section_label || "Class / Section"} />
-              <InfoRow label="Branch" value={student.section_label || "General"} />
-              <InfoRow label="Semester" value="IV" />
-              <InfoRow label="Scheme" value="School ERP Academic Session 2025-2026" />
+              <InfoRow label="Class / Section" value={student.section_label || "Class / Section"} />
+              <InfoRow label="Campus" value={student.campus_name || "MentriQ School"} />
+              <InfoRow label="Academic Year" value="Current session" />
+              <InfoRow label="Scheme" value="School ERP Academic Session" />
             </div>
           </div>
         </div>
@@ -409,19 +445,19 @@ function LmsSelectCoursePage({ student }: { student: Student }) {
           <h2 className="font-medium text-ink">Transactions</h2>
           <X size={18} className="text-muted" />
         </div>
-        <div className="border-l-4 border-accent px-4 py-3 text-sm font-semibold text-accent">Select Course</div>
+        <div className="border-l-4 border-accent px-4 py-3 text-sm font-semibold text-accent">Learning Resources</div>
       </aside>
 
       <section className="surface min-h-[34rem] overflow-hidden p-4 shadow-soft md:p-6">
-        <h2 className="mb-4 text-xl font-semibold text-ink">Select Course</h2>
+        <h2 className="mb-4 text-xl font-semibold text-ink">Learning Resources</h2>
         <div className="mb-8 flex max-w-5xl items-center gap-3 rounded-md border border-line/70 bg-white px-3 py-3 text-sm font-semibold text-green-700">
           <span className="flex h-11 w-11 items-center justify-center bg-accent text-white"><Bell size={18} /></span>
-          If the session is not showing, check the Exam Type on the session creation page.
+          Resources are shown according to your assigned class and section.
         </div>
         <label className="block max-w-2xl">
           <span className="text-sm font-medium text-ink"><span className="text-red-600">*</span> Session</span>
           <select className="mt-2 w-full rounded-md border border-blue-200 bg-white px-4 py-3 text-sm text-ink outline-none">
-            <option>Jan-June 2025-2026 - {student.campus_name || "MentriQ School"} ({student.section_label || "Class"})</option>
+            <option>Current academic session - {student.campus_name || "MentriQ School"} ({student.section_label || "Class"})</option>
           </select>
         </label>
 
@@ -429,9 +465,9 @@ function LmsSelectCoursePage({ student }: { student: Student }) {
           <div className="max-w-lg rounded-lg bg-blue-50 p-6 shadow-soft">
             <div className="flex items-start justify-between gap-5">
               <div>
-                <p className="text-sm leading-7 text-blue-700">MCA175A - Industrial<br />Training/Internship/Dissertation Project<br />Presentation - [ A ] A</p>
-                <p className="mt-2 text-sm"><strong>Type:</strong> Internship</p>
-                <p className="mt-2 text-sm"><strong>Year/Semester:</strong> IV</p>
+                <p className="text-sm leading-7 text-blue-700">{student.section_label || "Assigned class"} learning workspace</p>
+                <p className="mt-2 text-sm"><strong>School:</strong> {student.campus_name || "MentriQ School"}</p>
+                <p className="mt-2 text-sm"><strong>Admission No.:</strong> {student.admission_number}</p>
               </div>
               <GraduationCap size={58} className="text-slate-800" />
             </div>
@@ -471,13 +507,17 @@ export function StudentDashboard() {
   const [students, setStudents] = useState<Student[]>([]);
   const [selectedStudentId, setSelectedStudentId] = useState<number | null>(null);
   const [work, setWork] = useState<AssignedWork[]>([]);
+  const [submissions, setSubmissions] = useState<AssignmentSubmission[]>([]);
   const [attendance, setAttendance] = useState<AttendanceRecord[]>([]);
   const [results, setResults] = useState<ResultRecord[]>([]);
   const [resources, setResources] = useState<LearningResource[]>([]);
   const [admitCards, setAdmitCards] = useState<AdmitCard[]>([]);
+  const [documents, setDocuments] = useState<DocumentRecord[]>([]);
   const [fees, setFees] = useState<FeeAssignment[]>([]);
   const [payments, setPayments] = useState<Payment[]>([]);
+  const [transactions, setTransactions] = useState<PaymentTransaction[]>([]);
   const [announcements, setAnnouncements] = useState<Announcement[]>([]);
+  const [events, setEvents] = useState<AcademicEvent[]>([]);
   const [activeView, setActiveView] = useState<StudentView>("overview");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -486,16 +526,20 @@ export function StudentDashboard() {
     setLoading(true);
     setError("");
     try {
-      const [studentRes, workRes, attendanceRes, resultRes, resourceRes, admitRes, feeRes, paymentRes, announcementRes] = await Promise.all([
+      const [studentRes, workRes, submissionRes, attendanceRes, resultRes, resourceRes, admitRes, documentRes, feeRes, paymentRes, transactionRes, announcementRes, eventRes] = await Promise.all([
         studentApi.list(),
         assignedWorkApi.list(),
+        assignmentSubmissionApi.list(),
         attendanceApi.list(),
         resultRecordApi.list(),
         learningResourceApi.list(),
         admitCardApi.list(),
+        documentApi.list(),
         feeApi.list(),
         paymentApi.list(),
+        paymentTransactionApi.list(),
         announcementApi.list(),
+        academicEventApi.list(),
       ]);
       const studentList = asArray(studentRes);
       setStudents(studentList);
@@ -505,13 +549,17 @@ export function StudentDashboard() {
           : studentList[0]?.id ?? null
       ));
       setWork(asArray(workRes));
+      setSubmissions(asArray(submissionRes));
       setAttendance(asArray(attendanceRes));
       setResults(asArray(resultRes));
       setResources(asArray(resourceRes));
       setAdmitCards(asArray(admitRes));
+      setDocuments(asArray(documentRes));
       setFees(asArray(feeRes));
       setPayments(asArray(paymentRes));
+      setTransactions(asArray(transactionRes));
       setAnnouncements(asArray(announcementRes));
+      setEvents(asArray(eventRes));
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Failed to load student workspace.");
     } finally {
@@ -523,6 +571,19 @@ export function StudentDashboard() {
     load();
   }, [load]);
 
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      Promise.all([academicEventApi.list(), assignmentSubmissionApi.list(), paymentTransactionApi.list()])
+        .then(([eventRes, submissionRes, transactionRes]) => {
+          setEvents(asArray(eventRes));
+          setSubmissions(asArray(submissionRes));
+          setTransactions(asArray(transactionRes));
+        })
+        .catch(() => undefined);
+    }, 10000);
+    return () => window.clearInterval(timer);
+  }, []);
+
   const student = useMemo(
     () => students.find((item) => item.id === selectedStudentId) ?? students[0] ?? null,
     [selectedStudentId, students]
@@ -530,6 +591,10 @@ export function StudentDashboard() {
   const visibleWork = useMemo(
     () => student ? work.filter((item) => item.section === student.section) : [],
     [student, work]
+  );
+  const visibleSubmissions = useMemo(
+    () => student ? submissions.filter((item) => item.student === student.id) : [],
+    [student, submissions]
   );
   const visibleAttendance = useMemo(
     () => student ? attendance.filter((item) => item.student === student.id) : [],
@@ -547,6 +612,10 @@ export function StudentDashboard() {
     () => student ? admitCards.filter((card) => card.student === student.id) : [],
     [admitCards, student]
   );
+  const visibleDocuments = useMemo(
+    () => student ? documents.filter((document) => document.student === student.id) : [],
+    [documents, student]
+  );
   const visibleFees = useMemo(
     () => student ? fees.filter((item) => item.student === student.id) : [],
     [fees, student]
@@ -555,6 +624,19 @@ export function StudentDashboard() {
     const feeIds = new Set(visibleFees.map((item) => item.id));
     return payments.filter((payment) => feeIds.has(payment.fee_assignment));
   }, [payments, visibleFees]);
+  const visibleTransactions = useMemo(
+    () => student ? transactions.filter((transaction) => transaction.student === student.id) : [],
+    [student, transactions]
+  );
+  const visibleEvents = useMemo(
+    () => student
+      ? events.filter((event) => {
+          const payload = event.payload as { studentId?: number; sectionId?: number };
+          return event.student === student.id || payload.studentId === student.id || payload.sectionId === student.section || event.event_type === "noticePublished";
+        })
+      : [],
+    [events, student]
+  );
 
   const presentCount = visibleAttendance.filter((item) => item.status === "present").length;
   const attendancePct = visibleAttendance.length ? Math.round((presentCount / visibleAttendance.length) * 100) : 0;
@@ -636,13 +718,14 @@ export function StudentDashboard() {
               visibleWork={visibleWork}
               visibleAdmitCards={visibleAdmitCards}
               notices={announcements}
+              events={visibleEvents}
               setActiveView={setActiveView}
             />
           )}
 
           {activeView === "profile" && <StudentCompleteDetailPage student={student} />}
           {activeView === "lms" && <LmsSelectCoursePage student={student} />}
-          {activeView === "work" && <WorkList items={visibleWork} framed />}
+          {activeView === "work" && <StudentAssignmentsPage items={visibleWork} submissions={visibleSubmissions} onRefresh={load} />}
           {activeView === "attendance" && (
         <section className="surface overflow-hidden shadow-soft">
           <div className="flex flex-wrap items-center justify-between gap-3 border-b border-line/60 px-5 py-4">
@@ -679,65 +762,173 @@ export function StudentDashboard() {
               student={student}
               items={visibleFees}
               payments={visiblePayments}
+              transactions={visibleTransactions}
               outstandingAmount={outstandingAmount}
               paidAmount={paidAmount}
-            />
-          )}
-          {activeView === "parent" && (
-            <ParentViewPage
-              student={student}
-              attendancePct={attendancePct}
-              outstandingAmount={outstandingAmount}
-              paidAmount={paidAmount}
-              assignments={visibleWork}
-              results={visibleResults}
-              resources={visibleResources}
-              fees={visibleFees}
-              payments={visiblePayments}
-              notices={announcements}
             />
           )}
           {activeView === "resources" && <ResourceList items={visibleResources} />}
+          {activeView === "notices" && <NoticeList items={announcements} />}
+          {activeView === "documents" && <DocumentsPanel documents={visibleDocuments} admitCards={visibleAdmitCards} payments={visiblePayments} />}
+          {activeView === "parent" && (
+            <ParentViewPanel
+              student={student}
+              attendancePct={attendancePct}
+              attendance={visibleAttendance}
+              fees={visibleFees}
+              payments={visiblePayments}
+              results={visibleResults}
+              notices={announcements}
+              assignments={visibleWork}
+              submissions={visibleSubmissions}
+              documents={visibleDocuments}
+            />
+          )}
           {activeView === "admit" && <AdmitCardPanel card={latestAdmitCard} />}
       </div>
     </div>
   );
 }
 
-function WorkList({ items, framed = false }: { items: AssignedWork[]; framed?: boolean }) {
-  const content = items.length === 0 ? (
-    <p className="px-5 py-10 text-center text-sm text-muted">No assigned work available.</p>
-  ) : (
-    <div className="divide-y divide-line/40">
-      {items.map((item) => (
-        <article key={item.id} className="px-5 py-4">
-          <div className="flex flex-wrap items-start justify-between gap-3">
-            <div>
-              <p className="text-xs font-semibold uppercase tracking-widest text-muted">{item.subject}</p>
-              <h3 className="mt-1 font-semibold text-ink">{item.title}</h3>
-              {item.description && <p className="mt-2 max-w-3xl text-sm text-muted">{item.description}</p>}
-            </div>
-            <div className="flex flex-wrap items-center gap-2">
-              <Badge variant={statusBadge(item.status)}>{item.status}</Badge>
-              <span className="rounded-full border border-slate-200 bg-slate-50 px-2.5 py-0.5 text-xs text-slate-600">
-                Due {formatDate(item.due_date)}
-              </span>
-            </div>
-          </div>
-        </article>
-      ))}
-    </div>
-  );
+function StudentAssignmentsPage({
+  items,
+  submissions,
+  onRefresh,
+}: {
+  items: AssignedWork[];
+  submissions: AssignmentSubmission[];
+  onRefresh: () => Promise<void>;
+}) {
+  const [fileMap, setFileMap] = useState<Record<number, File | null>>({});
+  const [noteMap, setNoteMap] = useState<Record<number, string>>({});
+  const [busyId, setBusyId] = useState<number | null>(null);
+  const [message, setMessage] = useState("");
+  const [error, setError] = useState("");
+  const submissionByAssignment = new Map(submissions.map((submission) => [submission.assignment, submission]));
 
-  if (!framed) return content;
-  return <section className="surface overflow-hidden shadow-soft">{content}</section>;
+  async function run(label: string, action: () => Promise<void>, assignmentId?: number) {
+    setBusyId(assignmentId ?? null);
+    setMessage("");
+    setError("");
+    try {
+      await action();
+      setMessage(label);
+      await onRefresh();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Action failed.");
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  if (items.length === 0) return <EmptyState label="No assignments published yet." />;
+
+  return (
+    <section className="space-y-4">
+      {(message || error) && (
+        <div className={`rounded-md border px-4 py-3 text-sm ${error ? "border-rose-200 bg-rose-50 text-rose-700" : "border-emerald-200 bg-emerald-50 text-emerald-700"}`}>
+          {error || message}
+        </div>
+      )}
+      <div className="surface overflow-hidden shadow-soft">
+        <div className="divide-y divide-line/40">
+          {items.map((item) => {
+            const submission = submissionByAssignment.get(item.id);
+            return (
+              <article key={item.id} className="px-5 py-4">
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div>
+                    <p className="text-xs font-semibold uppercase tracking-widest text-muted">{item.subject}</p>
+                    <h3 className="mt-1 font-semibold text-ink">{item.title}</h3>
+                    {item.description && <p className="mt-2 max-w-3xl text-sm text-muted">{item.description}</p>}
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      <Badge variant={statusBadge(item.status)}>{item.status}</Badge>
+                      <Badge variant={submission ? statusBadge(submission.status) : "neutral"}>{submission ? `Submission ${submission.status}` : "Not submitted"}</Badge>
+                      <span className="rounded-md border border-slate-200 bg-slate-50 px-2.5 py-0.5 text-xs text-slate-600">Due {formatDate(item.due_date)}</span>
+                    </div>
+                    {submission?.remarks && <p className="mt-3 text-sm font-medium text-ink">Teacher remarks: <span className="font-normal text-muted">{submission.remarks}</span></p>}
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    <button
+                      type="button"
+                      onClick={() => run("Assignment downloaded.", async () => {
+                        const blob = await assignedWorkApi.download(item.id);
+                        downloadStudentBlob(blob, item.file_name || `${item.title}.pdf`);
+                      }, item.id)}
+                      className="inline-flex min-h-9 items-center gap-2 rounded-md border border-line/70 px-3 py-2 text-xs font-semibold text-ink hover:bg-slate-50"
+                    >
+                      <Download size={13} />
+                      Download
+                    </button>
+                    {submission && (
+                      <button
+                        type="button"
+                        onClick={() => run("Submission downloaded.", async () => {
+                          const blob = await assignmentSubmissionApi.download(submission.id);
+                          downloadStudentBlob(blob, submission.file_name || `submission-${submission.id}.pdf`);
+                        }, item.id)}
+                        className="inline-flex min-h-9 items-center gap-2 rounded-md border border-line/70 px-3 py-2 text-xs font-semibold text-ink hover:bg-slate-50"
+                      >
+                        <Download size={13} />
+                        Download Submission
+                      </button>
+                    )}
+                  </div>
+                </div>
+                <div className="mt-4 grid gap-3 rounded-md border border-line/70 bg-slate-50 p-3 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] md:items-end">
+                  <label className="block">
+                    <span className="text-xs font-semibold uppercase tracking-wider text-muted">Submission File</span>
+                    <input type="file" accept=".pdf,.doc,.docx,image/*" onChange={(event) => setFileMap((current) => ({ ...current, [item.id]: event.target.files?.[0] ?? null }))} className="mt-1 w-full rounded-md border border-line/70 bg-white px-3 py-2 text-sm" />
+                  </label>
+                  <label className="block">
+                    <span className="text-xs font-semibold uppercase tracking-wider text-muted">Note</span>
+                    <input value={noteMap[item.id] ?? ""} onChange={(event) => setNoteMap((current) => ({ ...current, [item.id]: event.target.value }))} className="mt-1 min-h-10 w-full rounded-md border border-line/70 bg-white px-3 text-sm" />
+                  </label>
+                  <button
+                    type="button"
+                    disabled={busyId === item.id}
+                    onClick={() => run("Assignment submitted.", async () => {
+                      const file = fileMap[item.id];
+                      if (!file) throw new ApiError(400, "Choose a submission file.");
+                      await assignedWorkApi.submit(item.id, file, noteMap[item.id] ?? "");
+                    }, item.id)}
+                    className="inline-flex min-h-10 items-center justify-center gap-2 rounded-md bg-ink px-3 py-2 text-sm font-semibold text-white disabled:opacity-60"
+                  >
+                    <Upload size={14} />
+                    Submit Assignment
+                  </button>
+                </div>
+              </article>
+            );
+          })}
+        </div>
+      </div>
+    </section>
+  );
 }
 
 function ResultList({ items, framed = false }: { items: ResultRecord[]; framed?: boolean }) {
+  const [busyId, setBusyId] = useState<number | null>(null);
+  const [error, setError] = useState("");
+
+  async function downloadResult(item: ResultRecord) {
+    setBusyId(item.id);
+    setError("");
+    try {
+      const blob = await resultRecordApi.downloadResult(item.id);
+      downloadStudentBlob(blob, `result-${item.id}.pdf`);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Unable to download result.");
+    } finally {
+      setBusyId(null);
+    }
+  }
+
   const content = items.length === 0 ? (
     <p className="px-5 py-10 text-center text-sm text-muted">No result records available.</p>
   ) : (
     <div className="divide-y divide-line/40">
+      {error && <p className="px-5 py-3 text-sm text-rose-600">{error}</p>}
       {items.map((item) => {
         const pct = scorePercent(item);
         return (
@@ -752,6 +943,15 @@ function ResultList({ items, framed = false }: { items: ResultRecord[]; framed?:
                 <p className="display-font text-2xl font-bold text-ink">{pct}%</p>
                 <p className="text-xs text-muted">{item.score} / {item.max_score}</p>
                 {item.grade && <Badge variant={pct >= 75 ? "success" : pct >= 50 ? "warning" : "danger"}>{item.grade}</Badge>}
+                <button
+                  type="button"
+                  disabled={busyId === item.id}
+                  onClick={() => downloadResult(item)}
+                  className="mt-3 inline-flex min-h-9 items-center gap-2 rounded-md border border-line/70 px-3 py-2 text-xs font-semibold text-ink hover:bg-slate-50 disabled:opacity-60"
+                >
+                  <Download size={13} />
+                  Download Result
+                </button>
               </div>
             </div>
           </article>
@@ -764,128 +964,18 @@ function ResultList({ items, framed = false }: { items: ResultRecord[]; framed?:
   return <section className="surface overflow-hidden shadow-soft">{content}</section>;
 }
 
-function ParentViewPage({
-  student,
-  attendancePct,
-  outstandingAmount,
-  paidAmount,
-  assignments,
-  results,
-  resources,
-  fees,
-  payments,
-  notices,
-}: {
-  student: Student;
-  attendancePct: number;
-  outstandingAmount: number;
-  paidAmount: number;
-  assignments: AssignedWork[];
-  results: ResultRecord[];
-  resources: LearningResource[];
-  fees: FeeAssignment[];
-  payments: Payment[];
-  notices: Announcement[];
-}) {
-  const latestResult = results[0];
-  const pendingAssignments = assignments.filter((item) => item.status !== "closed");
-  const pendingFees = fees.filter((item) => item.status !== "paid");
-
-  return (
-    <div className="grid gap-5 xl:grid-cols-[1fr_1fr]">
-      <section className="surface p-5 shadow-soft xl:col-span-2">
-        <div className="flex flex-wrap items-center justify-between gap-4">
-          <div>
-            <p className="text-xs font-semibold uppercase tracking-widest text-muted">Parent View</p>
-            <h2 className="mt-1 text-xl font-semibold text-ink">{student.full_name}</h2>
-            <p className="mt-1 text-sm text-muted">{student.section_label} - {student.campus_name}</p>
-          </div>
-          <Badge variant={attendancePct >= 75 ? "success" : attendancePct >= 50 ? "warning" : "danger"}>
-            {attendancePct}% attendance
-          </Badge>
-        </div>
-      </section>
-
-      {[
-        ["Pending fees", formatMoney(outstandingAmount), `${pendingFees.length} open fee record${pendingFees.length === 1 ? "" : "s"}`],
-        ["Paid fees", formatMoney(paidAmount), `${payments.length} receipt${payments.length === 1 ? "" : "s"}`],
-        ["Pending assignments", pendingAssignments.length, `${assignments.length} total assignment${assignments.length === 1 ? "" : "s"}`],
-        ["Available notes", resources.length, "Teacher-uploaded study material"],
-      ].map(([label, value, note]) => (
-        <div key={label} className="surface p-5 shadow-soft">
-          <p className="text-xs font-semibold uppercase tracking-widest text-muted">{label}</p>
-          <p className="display-font mt-2 text-3xl font-semibold text-ink">{value}</p>
-          <p className="mt-1 text-xs text-muted">{note}</p>
-        </div>
-      ))}
-
-      <section className="surface overflow-hidden shadow-soft">
-        <PanelHeader title="Fees & Payment Status" icon={ReceiptText} />
-        <div className="divide-y divide-line/50">
-          {fees.length ? fees.slice(0, 5).map((fee) => (
-            <div key={fee.id} className="flex items-center justify-between gap-4 px-5 py-4 text-sm">
-              <div>
-                <p className="font-semibold text-ink">{fee.title}</p>
-                <p className="text-xs text-muted">Due {formatDate(fee.due_date)}</p>
-              </div>
-              <div className="text-right">
-                <p className="font-semibold text-ink">{formatMoney(fee.outstanding_amount ?? fee.amount)}</p>
-                <Badge variant={statusBadge(fee.status)}>{fee.status}</Badge>
-              </div>
-            </div>
-          )) : <p className="px-5 py-10 text-center text-sm text-muted">No fee records available.</p>}
-        </div>
-      </section>
-
-      <section className="surface overflow-hidden shadow-soft">
-        <PanelHeader title="Results" icon={Award} />
-        {latestResult ? (
-          <div className="p-5">
-            <p className="text-xs font-semibold uppercase tracking-widest text-muted">{latestResult.exam_name}</p>
-            <h3 className="mt-1 font-semibold text-ink">{latestResult.subject}</h3>
-            <p className="mt-3 display-font text-3xl font-semibold text-ink">{scorePercent(latestResult)}%</p>
-            <p className="mt-1 text-sm text-muted">{latestResult.score} / {latestResult.max_score} {latestResult.grade ? `- ${latestResult.grade}` : ""}</p>
-          </div>
-        ) : <p className="px-5 py-10 text-center text-sm text-muted">No published results yet.</p>}
-      </section>
-
-      <section className="surface overflow-hidden shadow-soft">
-        <PanelHeader title="Assignments & Documents" icon={FileText} />
-        <div className="divide-y divide-line/50">
-          {assignments.length ? assignments.slice(0, 5).map((item) => (
-            <div key={item.id} className="px-5 py-4">
-              <p className="font-semibold text-ink">{item.title}</p>
-              <p className="mt-1 text-xs text-muted">{item.subject} - Due {formatDate(item.due_date)}</p>
-            </div>
-          )) : <p className="px-5 py-10 text-center text-sm text-muted">No assignments available.</p>}
-        </div>
-      </section>
-
-      <section className="surface overflow-hidden shadow-soft">
-        <PanelHeader title="Notices" icon={Bell} />
-        <div className="divide-y divide-line/50">
-          {notices.length ? notices.slice(0, 5).map((notice) => (
-            <div key={notice.id} className="px-5 py-4">
-              <p className="font-semibold text-ink">{notice.title}</p>
-              <p className="mt-1 text-xs text-muted">{formatDate(notice.publish_on)}</p>
-            </div>
-          )) : <p className="px-5 py-10 text-center text-sm text-muted">No notices available.</p>}
-        </div>
-      </section>
-    </div>
-  );
-}
-
 function OnlinePaymentPage({
   student,
   items,
   payments,
+  transactions,
   outstandingAmount,
   paidAmount,
 }: {
   student: Student;
   items: FeeAssignment[];
   payments: Payment[];
+  transactions: PaymentTransaction[];
   outstandingAmount: number;
   paidAmount: number;
 }) {
@@ -897,7 +987,7 @@ function OnlinePaymentPage({
     ? items.map((item, index) => ({
         id: item.id,
         receiptType: item.title,
-        semester: String(index + 1),
+        term: `Term ${index + 1}`,
         payable: item.amount,
         paid: item.amount_paid ?? "0",
         balance: item.outstanding_amount ?? "0",
@@ -910,24 +1000,13 @@ function OnlinePaymentPage({
     setPayError("");
     setPayMessage("");
     try {
-      await paymentTransactionApi.create({
-        campus: student.campus,
-        student: student.id,
+      const order = await paymentTransactionApi.createOrder({
         fee_assignment: payableFee.id,
-        payment: null,
+        amount: String(amountValue(payableFee.outstanding_amount ?? payableFee.payable_amount ?? payableFee.amount)),
         provider: "razorpay",
         method: "upi",
-        amount: String(amountValue(payableFee.outstanding_amount ?? payableFee.amount)),
-        currency: "INR",
-        status: "pending",
-        gateway_order_id: "",
-        gateway_payment_id: "",
-        gateway_signature: "",
-        receipt_number: "",
-        webhook_verified: false,
-        raw_payload: { source: "student_portal", fee_title: payableFee.title },
       });
-      setPayMessage("Payment transaction created. Complete the payment from the configured Razorpay/UPI checkout.");
+      setPayMessage(`Payment order ${order.gateway_order_id} created for ${formatMoney(order.amount)} using ${order.gateway.maskedKeyId || order.gateway.provider}. Complete checkout from the school's configured gateway.`);
     } catch (err) {
       setPayError(err instanceof ApiError ? err.message : "Unable to start payment.");
     } finally {
@@ -951,13 +1030,13 @@ function OnlinePaymentPage({
         <div className="grid gap-x-10 gap-y-0 xl:grid-cols-2">
           <div>
             <InfoRow label="Student Name" value={student.full_name} />
-            <InfoRow label="RRNO" value={student.admission_number} />
+            <InfoRow label="Admission No." value={student.admission_number} />
             <InfoRow label="School/Institute Name" value={student.campus_name || "MentriQ School"} />
             <InfoRow label="E-Mail ID" value={student.contact_email} />
           </div>
           <div>
-            <InfoRow label="Degree Name" value={student.section_label || "Class / Section"} />
-            <InfoRow label="Branch / Program" value={student.section_label || "General"} />
+            <InfoRow label="Class / Section" value={student.section_label || "Class / Section"} />
+            <InfoRow label="Campus" value={student.campus_name || "MentriQ School"} />
             <InfoRow label="Mobile No." value={student.phone_number} />
             <InfoRow label="Total Amount" value={formatMoney(outstandingAmount || paidAmount)} />
           </div>
@@ -973,13 +1052,9 @@ function OnlinePaymentPage({
             </select>
           </label>
           <label className="block">
-            <span className="text-sm font-medium text-ink"><span className="text-red-600">*</span> Semester</span>
+            <span className="text-sm font-medium text-ink"><span className="text-red-600">*</span> Term</span>
             <select className="mt-2 w-full rounded-md border border-blue-200 bg-white px-4 py-3 text-sm text-ink outline-none">
-              <option>Please Select</option>
-              <option>I</option>
-              <option>II</option>
-              <option>III</option>
-              <option>IV</option>
+              <option>Current Term</option>
             </select>
           </label>
         </div>
@@ -1003,25 +1078,46 @@ function OnlinePaymentPage({
             <table className="text-sm">
               <thead>
                 <tr>
-                  {["Receipt Type", "Semester", "Payable Fee / Applicable Fee", "Paid", "Balance"].map((head) => (
-                    <th key={head} className="px-4 py-3 text-left">{head}</th>
-                  ))}
-                </tr>
+                {["Receipt Type", "Term", "Payable Fee / Applicable Fee", "Paid", "Balance", "Status"].map((head) => (
+                  <th key={head} className="px-4 py-3 text-left">{head}</th>
+                ))}
+              </tr>
               </thead>
               <tbody>
                 {tableRows.length ? tableRows.map((row) => (
                   <tr key={row.id} className="border-b border-white even:bg-slate-100">
                     <td className="px-4 py-3">{row.receiptType}</td>
-                    <td className="px-4 py-3 text-blue-700">{row.semester}</td>
+                    <td className="px-4 py-3 text-blue-700">{row.term}</td>
                     <td className="px-4 py-3">{Number(row.payable || 0).toFixed(2)}</td>
                     <td className="px-4 py-3">{Number(row.paid || 0).toFixed(2)}</td>
                     <td className="px-4 py-3">{Number(row.balance || 0).toFixed(2)}</td>
+                    <td className="px-4 py-3"><Badge variant={statusBadge(items.find((item) => item.id === row.id)?.status ?? "pending")}>{items.find((item) => item.id === row.id)?.status ?? "pending"}</Badge></td>
                   </tr>
                 )) : (
-                  <tr><td className="px-4 py-8 text-center text-muted" colSpan={5}>No fee payment records available.</td></tr>
+                  <tr><td className="px-4 py-8 text-center text-muted" colSpan={6}>No fee payment records available.</td></tr>
                 )}
               </tbody>
             </table>
+          </div>
+        </div>
+
+        <div className="mt-6">
+          <h2 className="mastersoft-section-title">Payment Status</h2>
+          <div className="mt-4 divide-y divide-line/60 rounded-md border border-line/70 bg-white">
+            {transactions.length === 0 ? (
+              <p className="px-4 py-6 text-center text-sm text-muted">No online transactions started.</p>
+            ) : transactions.map((transaction) => (
+              <div key={transaction.id} className="flex flex-wrap items-center justify-between gap-4 px-4 py-3 text-sm">
+                <div>
+                  <p className="font-semibold text-ink">{transaction.gateway_order_id || "Gateway order"}</p>
+                  <p className="text-xs text-muted">{transaction.provider} - {transaction.gateway_payment_id || "Awaiting payment"}</p>
+                </div>
+                <div className="flex items-center gap-3">
+                  <Badge variant={statusBadge(transaction.status)}>{transaction.status}</Badge>
+                  <span className="font-semibold text-ink">{formatMoney(transaction.amount)}</span>
+                </div>
+              </div>
+            ))}
           </div>
         </div>
 
@@ -1039,6 +1135,16 @@ function OnlinePaymentPage({
                 <div className="text-right">
                   <p className="font-semibold text-ink">{formatMoney(payment.amount_paid)}</p>
                   <p className="text-xs text-muted">{formatDate(payment.paid_on)}</p>
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      const blob = await paymentApi.downloadReceipt(payment.id);
+                      downloadStudentBlob(blob, `${payment.receipt_number || "receipt"}.pdf`);
+                    }}
+                    className="mt-2 rounded-md border border-line/70 px-3 py-1.5 text-xs font-semibold text-accent hover:bg-accent-soft"
+                  >
+                    Download Receipt
+                  </button>
                 </div>
               </div>
             ))}
@@ -1049,11 +1155,182 @@ function OnlinePaymentPage({
   );
 }
 
+function NoticeList({ items }: { items: Announcement[] }) {
+  if (items.length === 0) return <EmptyState label="No notices published yet." />;
+  return (
+    <section className="surface overflow-hidden shadow-soft">
+      <div className="divide-y divide-line/50">
+        {items.map((notice) => (
+          <article key={notice.id} className="px-5 py-4">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-widest text-muted">{notice.audience}</p>
+                <h3 className="mt-1 font-semibold text-ink">{notice.title}</h3>
+                <p className="mt-2 max-w-3xl text-sm leading-6 text-muted">{notice.message}</p>
+              </div>
+              <span className="text-xs text-muted">{formatDate(notice.publish_on)}</span>
+            </div>
+          </article>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function DocumentsPanel({
+  documents,
+  admitCards,
+  payments,
+}: {
+  documents: DocumentRecord[];
+  admitCards: AdmitCard[];
+  payments: Payment[];
+}) {
+  return (
+    <div className="grid gap-5 xl:grid-cols-3">
+      <section className="surface overflow-hidden shadow-soft">
+        <PanelHeader title="Uploaded Documents" icon={FileText} />
+        <div className="divide-y divide-line/50">
+          {documents.map((document) => (
+            <div key={document.id} className="px-4 py-3 text-sm">
+              <p className="font-semibold text-ink">{document.title}</p>
+              <p className="text-xs text-muted">{document.document_type} - {statusLabel(document.status)}</p>
+            </div>
+          ))}
+          {documents.length === 0 && <p className="px-4 py-8 text-center text-sm text-muted">No documents uploaded yet.</p>}
+        </div>
+      </section>
+      <section className="surface overflow-hidden shadow-soft">
+        <PanelHeader title="Admit Cards" icon={BadgeCheck} />
+        <div className="divide-y divide-line/50">
+          {admitCards.map((card) => (
+            <div key={card.id} className="px-4 py-3 text-sm">
+              <p className="font-semibold text-ink">{card.exam_name}</p>
+              <p className="text-xs text-muted">{formatDate(card.exam_date)} - {card.status}</p>
+            </div>
+          ))}
+          {admitCards.length === 0 && <p className="px-4 py-8 text-center text-sm text-muted">No admit cards issued yet.</p>}
+        </div>
+      </section>
+      <section className="surface overflow-hidden shadow-soft">
+        <PanelHeader title="Receipts" icon={ReceiptText} />
+        <div className="divide-y divide-line/50">
+          {payments.map((payment) => (
+            <div key={payment.id} className="flex items-center justify-between gap-3 px-4 py-3 text-sm">
+              <div>
+                <p className="font-semibold text-ink">{payment.receipt_number || payment.fee_title || "Receipt"}</p>
+                <p className="text-xs text-muted">{formatMoney(payment.amount_paid)} - {formatDate(payment.paid_on)}</p>
+              </div>
+              <button
+                type="button"
+                onClick={async () => {
+                  const blob = await paymentApi.downloadReceipt(payment.id);
+                  downloadStudentBlob(blob, `${payment.receipt_number || "receipt"}.pdf`);
+                }}
+                className="inline-flex min-h-9 items-center gap-2 rounded-md border border-line/70 px-3 py-2 text-xs font-semibold text-ink hover:bg-slate-50"
+              >
+                <Download size={13} />
+                Download Receipt
+              </button>
+            </div>
+          ))}
+          {payments.length === 0 && <p className="px-4 py-8 text-center text-sm text-muted">No receipts generated yet.</p>}
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function ParentViewPanel({
+  student,
+  attendancePct,
+  attendance,
+  fees,
+  payments,
+  results,
+  notices,
+  assignments,
+  submissions,
+  documents,
+}: {
+  student: Student;
+  attendancePct: number;
+  attendance: AttendanceRecord[];
+  fees: FeeAssignment[];
+  payments: Payment[];
+  results: ResultRecord[];
+  notices: Announcement[];
+  assignments: AssignedWork[];
+  submissions: AssignmentSubmission[];
+  documents: DocumentRecord[];
+}) {
+  const pendingFees = fees.filter((fee) => fee.status !== "paid");
+  const pendingAssignments = assignments.filter((assignment) => !submissions.some((submission) => submission.assignment === assignment.id));
+  return (
+    <div className="space-y-5">
+      <section className="surface p-5 shadow-soft">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <p className="text-xs font-semibold uppercase tracking-widest text-muted">Parent View</p>
+            <h2 className="mt-1 text-xl font-semibold text-ink">{student.full_name}</h2>
+            <p className="mt-1 text-sm text-muted">{student.section_label} - {student.admission_number}</p>
+          </div>
+          <Badge variant={student.status === "active" ? "success" : "neutral"}>{student.status}</Badge>
+        </div>
+      </section>
+      <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+        <div className="surface p-4 shadow-soft"><p className="text-sm text-muted">Attendance</p><p className="mt-2 text-2xl font-semibold text-ink">{attendancePct}%</p></div>
+        <div className="surface p-4 shadow-soft"><p className="text-sm text-muted">Pending Fees</p><p className="mt-2 text-2xl font-semibold text-ink">{formatMoney(pendingFees.reduce((sum, fee) => sum + amountValue(fee.outstanding_amount ?? fee.amount), 0))}</p></div>
+        <div className="surface p-4 shadow-soft"><p className="text-sm text-muted">Pending Assignments</p><p className="mt-2 text-2xl font-semibold text-ink">{pendingAssignments.length}</p></div>
+        <div className="surface p-4 shadow-soft"><p className="text-sm text-muted">Latest Result</p><p className="mt-2 text-2xl font-semibold text-ink">{results[0]?.grade || "NA"}</p></div>
+      </section>
+      <section className="grid gap-5 xl:grid-cols-3">
+        <SummaryList title="Attendance" items={attendance.slice(0, 5).map((item) => `${formatDate(item.date)} - ${statusLabel(item.status)}`)} />
+        <SummaryList title="Fees & Receipts" items={[...pendingFees.map((fee) => `${fee.title} pending ${formatMoney(fee.outstanding_amount ?? fee.amount)}`), ...payments.slice(0, 3).map((payment) => `${payment.receipt_number || "Receipt"} ${formatMoney(payment.amount_paid)}`)]} />
+        <SummaryList title="Notices" items={notices.slice(0, 5).map((notice) => notice.title)} />
+        <SummaryList title="Assignments" items={assignments.slice(0, 5).map((assignment) => `${assignment.title} - ${statusLabel(submissions.find((submission) => submission.assignment === assignment.id)?.status || "pending")}`)} />
+        <SummaryList title="Results" items={results.slice(0, 5).map((result) => `${result.exam_name} ${result.subject}: ${result.score}/${result.max_score}`)} />
+        <SummaryList title="Documents" items={documents.slice(0, 5).map((document) => document.title)} />
+      </section>
+    </div>
+  );
+}
+
+function SummaryList({ title, items }: { title: string; items: string[] }) {
+  return (
+    <section className="surface overflow-hidden shadow-soft">
+      <PanelHeader title={title} />
+      <div className="divide-y divide-line/50">
+        {items.map((item) => <p key={item} className="px-4 py-3 text-sm text-muted">{item}</p>)}
+        {items.length === 0 && <p className="px-4 py-8 text-center text-sm text-muted">No records available.</p>}
+      </div>
+    </section>
+  );
+}
+
 function ResourceList({ items }: { items: LearningResource[] }) {
+  const [busyId, setBusyId] = useState<number | null>(null);
+  const [error, setError] = useState("");
+
+  async function downloadResource(item: LearningResource) {
+    setBusyId(item.id);
+    setError("");
+    try {
+      const blob = await learningResourceApi.download(item.id);
+      downloadStudentBlob(blob, item.file_name || `${item.title}.pdf`);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Unable to download notes.");
+    } finally {
+      setBusyId(null);
+    }
+  }
+
   if (items.length === 0) return <EmptyState label="No resources or notes published yet." />;
 
   return (
-    <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+    <section className="space-y-3">
+      {error && <p className="rounded-md border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">{error}</p>}
+      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
       {items.map((item) => (
         <article key={item.id} className="surface p-5 shadow-soft">
           <div className="flex items-start justify-between gap-3">
@@ -1066,20 +1343,19 @@ function ResourceList({ items }: { items: LearningResource[] }) {
           {item.description && <p className="mt-3 text-sm text-muted">{item.description}</p>}
           <div className="mt-4 flex items-center justify-between gap-3">
             <span className="text-xs text-muted">{formatDate(item.published_on)}</span>
-            {item.file_url && (
-              <a
-                href={item.file_url}
-                target="_blank"
-                rel="noreferrer"
-                className="flex items-center gap-1.5 rounded-xl border border-line/70 px-3 py-1.5 text-xs font-medium text-ink hover:bg-slate-50"
-              >
-                <ExternalLink size={12} />
-                Open
-              </a>
-            )}
+            <button
+              type="button"
+              onClick={() => downloadResource(item)}
+              disabled={busyId === item.id}
+              className="flex min-h-9 items-center gap-1.5 rounded-md border border-line/70 px-3 py-2 text-xs font-semibold text-ink hover:bg-slate-50 disabled:opacity-60"
+            >
+              <Download size={12} />
+              Download Notes
+            </button>
           </div>
         </article>
       ))}
+      </div>
     </section>
   );
 }

@@ -1,18 +1,21 @@
-from rest_framework import viewsets
+from drf_spectacular.utils import extend_schema, inline_serializer
+from rest_framework import serializers, viewsets
 from rest_framework.decorators import action
+from rest_framework.exceptions import PermissionDenied
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework_simplejwt.views import TokenObtainPairView
+from django.db.models import Q
 
-from apps.core.models import AuditAction, AuditEvent
+from apps.core.models import AuditAction, AuditEvent, UserActivityLog
 from apps.core.permissions import RoleAccessPermission
 
 from .captcha import generate_captcha_challenge
 from .models import User, UserRole
-from .serializers import ERPTokenObtainPairSerializer, UserAdminSerializer, UserSerializer
+from .serializers import ERPTokenObtainPairSerializer, PasswordChangeSerializer, UserAdminSerializer, UserSerializer
 
-ADMIN_ROLES = (UserRole.SUPER_ADMIN, UserRole.ADMIN)
+ADMIN_ROLES = (UserRole.SUPER_ADMIN, UserRole.SCHOOL_ADMIN)
 
 
 def get_client_ip(request) -> str | None:
@@ -40,6 +43,17 @@ class ERPTokenObtainPairView(TokenObtainPairView):
                     summary="User login",
                     ip_address=get_client_ip(request),
                 )
+                UserActivityLog.objects.create(
+                    campus=user.school,
+                    user=user,
+                    activity_type="login",
+                    summary="User login",
+                    request_path=request.path,
+                    method=request.method,
+                    ip_address=get_client_ip(request),
+                    user_agent=request.META.get("HTTP_USER_AGENT", ""),
+                    metadata={"role": user.role},
+                )
         return response
 
 
@@ -48,6 +62,17 @@ class CaptchaChallengeView(APIView):
     permission_classes = [AllowAny]
     throttle_scope = "captcha"
 
+    @extend_schema(
+        responses=inline_serializer(
+            name="CaptchaChallengeResponse",
+            fields={
+                "challenge_id": serializers.CharField(),
+                "code": serializers.CharField(),
+                "expires_in": serializers.IntegerField(),
+                "expires_at": serializers.DateTimeField(),
+            },
+        )
+    )
     def get(self, request):
         challenge = generate_captcha_challenge()
         return Response(
@@ -63,9 +88,11 @@ class CaptchaChallengeView(APIView):
 class CurrentUserView(APIView):
     permission_classes = [IsAuthenticated]
 
+    @extend_schema(responses=UserSerializer)
     def get(self, request):
         return Response(UserSerializer(request.user).data)
 
+    @extend_schema(request=UserSerializer, responses=UserSerializer)
     def patch(self, request):
         serializer = UserSerializer(request.user, data=request.data, partial=True)
         serializer.is_valid(raise_exception=True)
@@ -82,8 +109,28 @@ class CurrentUserView(APIView):
         )
         return Response(serializer.data)
 
+    @extend_schema(request=UserSerializer, responses=UserSerializer)
     def put(self, request):
         return self.patch(request)
+
+
+class PasswordChangeView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(request=PasswordChangeSerializer, responses=UserSerializer)
+    def post(self, request):
+        serializer = PasswordChangeSerializer(data=request.data, context={"request": request})
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        AuditEvent.objects.create(
+            actor=request.user,
+            action=AuditAction.UPDATE,
+            entity_type="User",
+            entity_id=str(request.user.pk),
+            summary="User changed password",
+            ip_address=get_client_ip(request),
+        )
+        return Response(UserSerializer(request.user).data)
 
 
 class UserViewSet(viewsets.ModelViewSet):
@@ -97,16 +144,29 @@ class UserViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         queryset = super().get_queryset()
-        if getattr(self.request.user, "role", None) == UserRole.ADMIN:
+        if getattr(self.request.user, "role", None) == UserRole.SCHOOL_ADMIN:
             from apps.core.models import CampusMembership
 
-            campus_ids = CampusMembership.objects.filter(user=self.request.user).values_list("campus_id", flat=True)
+            campus_ids = [self.request.user.school_id] if self.request.user.school_id else list(
+                CampusMembership.objects.filter(user=self.request.user).values_list("campus_id", flat=True)
+            )
             return (
                 queryset.exclude(role=UserRole.SUPER_ADMIN)
-                .filter(campus_memberships__campus_id__in=campus_ids)
+                .filter(Q(campus_memberships__campus_id__in=campus_ids) | Q(school_id__in=campus_ids))
                 .distinct()
-            )
+        )
         return queryset
+
+    def perform_destroy(self, instance):
+        if instance.is_protected_super_admin:
+            raise PermissionDenied("Super Admin accounts cannot be deleted.")
+        instance.delete()
+
+    def perform_update(self, serializer):
+        instance = self.get_object()
+        if instance.is_protected_super_admin and self.request.user.pk != instance.pk:
+            raise PermissionDenied("Super Admin accounts cannot be modified by another user.")
+        serializer.save()
 
     @action(detail=True, methods=["get"], url_path="detail")
     def detail_view(self, request, pk=None):

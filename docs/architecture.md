@@ -9,15 +9,15 @@ Next.js responsive web app
   -> Redis for cache and async expansion
 ```
 
-The backend owns business rules, role checks, relational integrity, and campus database routing. The frontend owns the device-responsive user experience for admins, teachers, students, and parents.
+The backend owns business rules, role checks, relational integrity, and campus database routing. The frontend owns the device-responsive user experience for Super Admin, School Admin, Account, Teacher, and Student users.
 
 ## Role Model
 
 - `super_admin`: full platform control
-- `admin`: campus setup, users, students, fees, payments, reports
+- `school_admin`: school setup, users, students, fees, payments, reports
+- `account`: assigned-school fee, payment, transaction, and salary workflows
 - `teacher`: assigned section attendance and student reads
 - `student`: own profile, attendance, fees, assignments, results, resources, and admit cards
-- `parent`: linked student profile, attendance, fees, assignments, results, resources, transport, hostel, and notices
 
 ## Core Data Flow
 
@@ -27,10 +27,9 @@ User logs in
   -> app shell selects workspace
   -> admin creates campus/session/section/student
   -> teacher marks attendance
-  -> admin assigns fee and records payment
+  -> school admin or account user assigns fee and records payment
   -> reports update from source tables
   -> student sees own scoped data
-  -> parent sees linked student data through guardian links
 ```
 
 ## Multi-Tenant Databases
@@ -42,7 +41,7 @@ Tenant selection can come from `X-Campus-Code`, the `campus_code` query paramete
 ## Backend Modules
 
 - `apps.accounts`: custom user model, role enum, JWT serializer, current user, admin user API
-- `apps.core`: academic setup, students, guardians, attendance, fees, payments, staff profiles, timetable, library, transport, hostel, reports, audit events
+- `apps.core`: academic setup, students, attendance, fees, payments, staff profiles, timetable, library, transport, hostel, reports, audit events
 - `config.settings`: split local and production settings
 
 ## Frontend Modules
@@ -54,7 +53,6 @@ Tenant selection can come from `X-Campus-Code`, the `campus_code` query paramete
 - `SchoolOperationsPanel`: staff profiles, timetable, library, transport, and hostel operations
 - `StudentDashboard`: student read-only view
 - `ReportsDashboard`: analytics and audit trail
-- `ERPWorkspace`: blueprint view at `/blueprint`
 
 ## Database Entities
 
@@ -63,7 +61,6 @@ Tenant selection can come from `X-Campus-Code`, the `campus_code` query paramete
 - `AcademicSession`
 - `ClassSection`
 - `Student`
-- `StudentGuardian`
 - `AttendanceRecord`
 - `StaffProfile`
 - `TimetableSlot`
@@ -84,7 +81,6 @@ Tenant selection can come from `X-Campus-Code`, the `campus_code` query paramete
 - API querysets are role-scoped.
 - Teachers cannot mark attendance outside assigned sections.
 - Students cannot read unlinked student data.
-- Parents cannot read unlinked student data and cannot write ERP records.
 - Audit endpoints are admin-only.
 - Production settings enable secure cookies, HSTS, HTTPS redirect, and CORS allowlists.
 

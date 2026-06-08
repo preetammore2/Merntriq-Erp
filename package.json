@@ -6,6 +6,18 @@
   "scripts": {
     "web:dev": "pnpm --dir web dev",
     "web:build": "pnpm --dir web build",
-    "web:lint": "pnpm --dir web lint"
+    "web:lint": "pnpm --dir web lint",
+    "lint": "pnpm --dir web lint",
+    "build": "pnpm --dir web build",
+    "test": "python backend/manage.py test apps.accounts apps.core",
+    "test:backend": "python backend/manage.py test apps.accounts apps.core",
+    "migrate:check": "python backend/manage.py makemigrations --check --dry-run",
+    "check:deploy": "python backend/manage.py check --deploy"
+  },
+  "pnpm": {
+    "overrides": {
+      "brace-expansion@5.0.5": "5.0.6",
+      "postcss": "8.5.15"
+    }
   }
 }

@@ -22,8 +22,8 @@ import { BrandLogo } from "@/components/brand-logo";
 
 const LOGIN_FEATURES = [
   { label: "Role access", value: "Super admin, school admin, account, teacher, student" },
-  { label: "Campus suite", value: "Users, admissions, staff, fees, academics, reports" },
-  { label: "Learner portal", value: "Attendance, homework, results, fees, parent view" },
+  { label: "School suite", value: "Users, admissions, staff, fees, academics, reports" },
+  { label: "Student portal", value: "Attendance, homework, results, fees, admit cards" },
 ];
 
 export function LoginPage() {
@@ -98,7 +98,7 @@ export function LoginPage() {
             <div className="flex items-center justify-between gap-4">
               <BrandLogo size="lg" />
               <span className="rounded-md border border-line/70 bg-white px-3 py-1 text-xs font-semibold uppercase tracking-[0.16em] text-muted shadow-sm">
-                Campus360
+                School ERP
               </span>
             </div>
 
@@ -121,7 +121,7 @@ export function LoginPage() {
                 One login for every campus workflow.
               </h1>
               <p className="mt-4 max-w-xl text-sm leading-7 text-muted">
-                Manage admissions, attendance, academics, fees, reports, staff, documents, and student services from one responsive ERP workspace.
+                Manage admissions, attendance, academics, fees, reports, staff, documents, and student services from one responsive school ERP workspace.
               </p>
             </div>
 
@@ -148,7 +148,7 @@ export function LoginPage() {
             <div className="mb-6 flex flex-col gap-4 border-b border-line/70 pb-4 sm:flex-row sm:items-start sm:justify-between">
               <BrandLogo />
               <p className="max-w-[13rem] text-left text-xs leading-5 text-muted sm:text-right">
-                MentriQ Campus360 School ERP
+                MentriQ360 School ERP
                 <span className="block font-semibold text-ink">Secure institutional access</span>
               </p>
             </div>
