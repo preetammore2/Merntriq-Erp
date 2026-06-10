@@ -39,11 +39,13 @@ export function LoginPage() {
   const [tenantCode, setTenantCode] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [apiRetryCount, setApiRetryCount] = useState(0);
   const connectionStatus = useMemo(() => {
     if (captchaLoading) return { label: "Checking API", tone: "checking", Icon: RefreshCcw };
     if (captchaChallenge) return { label: "API connected", tone: "online", Icon: CheckCircle2 };
+    if (apiRetryCount > 0) return { label: `Retry ${apiRetryCount}/3`, tone: "offline", Icon: WifiOff };
     return { label: "API unavailable", tone: "offline", Icon: WifiOff };
-  }, [captchaChallenge, captchaLoading]);
+  }, [captchaChallenge, captchaLoading, apiRetryCount]);
   const ConnectionIcon = connectionStatus.Icon;
   const tenantLabel = tenantCode ? `Tenant ${tenantCode}` : "Central tenant";
 
@@ -54,6 +56,7 @@ export function LoginPage() {
       const challenge = await authApi.captcha();
       setCaptchaChallenge(challenge);
       setCaptcha("");
+      setApiRetryCount(0);
     } catch (err) {
       setCaptchaChallenge(null);
       setError(err instanceof ApiError ? err.message : "Captcha could not be loaded. Check the server connection.");
@@ -66,6 +69,16 @@ export function LoginPage() {
     setTenantCode(getActiveTenantCampusCode());
     void loadCaptcha(false);
   }, [loadCaptcha]);
+
+  useEffect(() => {
+    if (!captchaChallenge && !captchaLoading && apiRetryCount < 3) {
+      const timer = setTimeout(() => {
+        setApiRetryCount((c) => c + 1);
+        void loadCaptcha(false);
+      }, 3000);
+      return () => clearTimeout(timer);
+    }
+  }, [captchaChallenge, captchaLoading, apiRetryCount, loadCaptcha]);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -144,7 +157,7 @@ export function LoginPage() {
             </span>
           </div>
 
-          <form onSubmit={handleSubmit} className="login-card" noValidate>
+          <form onSubmit={handleSubmit} className="login-card animate-fade-up" noValidate>
             <div className="mb-6 flex flex-col gap-4 border-b border-line/70 pb-4 sm:flex-row sm:items-start sm:justify-between">
               <BrandLogo />
               <p className="max-w-[13rem] text-left text-xs leading-5 text-muted sm:text-right">
@@ -298,10 +311,19 @@ export function LoginPage() {
               id="login-submit"
               type="submit"
               disabled={busy || captchaLoading || !captchaChallenge || !username || !password || !captcha}
-              className="mt-6 flex w-full items-center justify-center gap-2 rounded-md bg-red-600 py-3 text-base font-semibold text-white shadow-md transition hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-60"
+              className="mt-6 flex w-full items-center justify-center gap-2 rounded-md bg-red-600 py-3 text-base font-semibold text-white shadow-md transition-all duration-200 hover:bg-red-700 hover:shadow-lg active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-60 disabled:active:scale-100"
             >
-              {busy ? "Signing in..." : "Sign in"}
-              {!busy ? <ArrowRight size={17} /> : null}
+              {busy ? (
+                <span className="flex items-center gap-2">
+                  <RefreshCcw size={17} className="animate-spin" />
+                  Signing in...
+                </span>
+              ) : (
+                <>
+                  Sign in
+                  <ArrowRight size={17} />
+                </>
+              )}
             </button>
 
             <div className="mt-5 grid gap-3 sm:grid-cols-[1fr_auto]">

@@ -1040,6 +1040,93 @@ tbody tr:hover {
   }
 }
 
+@keyframes fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes slide-right {
+  from {
+    opacity: 0;
+    transform: translateX(-12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+.animate-fade-up {
+  animation: fade-up 360ms ease-out both;
+}
+
+.animate-fade-in {
+  animation: fade-in 240ms ease-out both;
+}
+
+.animate-slide-right {
+  animation: slide-right 300ms ease-out both;
+}
+
+.animate-stagger {
+  animation: fade-up 360ms ease-out both;
+}
+
+.animate-stagger-1 { animation-delay: 40ms; }
+.animate-stagger-2 { animation-delay: 80ms; }
+.animate-stagger-3 { animation-delay: 120ms; }
+.animate-stagger-4 { animation-delay: 160ms; }
+.animate-stagger-5 { animation-delay: 200ms; }
+.animate-stagger-6 { animation-delay: 240ms; }
+
+.hover-lift {
+  transition: transform 180ms ease, box-shadow 180ms ease;
+}
+
+.hover-lift:hover {
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-lift);
+}
+
+.hover-scale {
+  transition: transform 160ms ease;
+}
+
+.hover-scale:hover {
+  transform: scale(1.03);
+}
+
+.bg-gradient-accent {
+  background: linear-gradient(135deg, var(--accent), #1f43a7);
+}
+
+.bg-gradient-warm {
+  background: linear-gradient(135deg, #f6f8fb, #eef3f9);
+}
+
+.text-gradient {
+  background: linear-gradient(135deg, var(--accent), #ff7a00);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.backdrop-blur {
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+
 @media print {
   header,
   nav,

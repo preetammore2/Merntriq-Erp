@@ -303,10 +303,10 @@ export function HardwareDeviceConfiguration({
               <ToggleRow label="Server Req" checked={form.server_required} onChange={(checked) => setForm((current) => ({ ...current, server_required: checked }))} />
               <ToggleRow label="Use domainNm" checked={form.use_domain_name} onChange={(checked) => setForm((current) => ({ ...current, use_domain_name: checked }))} />
               <Field label="DomainNm">
-                <input className={inputCls} value={form.domain_name} onChange={(event) => setForm((current) => ({ ...current, domain_name: event.target.value }))} placeholder="device.nialabs.in" />
+                <input className={inputCls} value={form.domain_name} onChange={(event) => setForm((current) => ({ ...current, domain_name: event.target.value }))} placeholder="device.example.com" />
               </Field>
               <Field label="Server IP">
-                <input className={inputCls} value={form.server_ip} onChange={(event) => setForm((current) => ({ ...current, server_ip: event.target.value }))} placeholder="192.168.000.109" />
+                <input className={inputCls} value={form.server_ip} onChange={(event) => setForm((current) => ({ ...current, server_ip: event.target.value }))} placeholder="192.168.1.100" />
               </Field>
               <Field label="SerPortNo">
                 <input type="number" min={1} max={65535} className={inputCls} value={form.server_port} onChange={(event) => setForm((current) => ({ ...current, server_port: event.target.value }))} />

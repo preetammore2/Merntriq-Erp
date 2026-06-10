@@ -217,7 +217,11 @@ MENTRIQ_PASSWORD_RESET_TOKEN_MINUTES = env("MENTRIQ_PASSWORD_RESET_TOKEN_MINUTES
 MENTRIQ_VERIFICATION_TOKEN_HOURS = env("MENTRIQ_VERIFICATION_TOKEN_HOURS")
 MENTRIQ_PASSWORD_EXPIRY_DAYS = env("MENTRIQ_PASSWORD_EXPIRY_DAYS")
 
-CORS_ALLOWED_ORIGINS = env("DJANGO_CORS_ALLOWED_ORIGINS")
+_cors_origins = env("DJANGO_CORS_ALLOWED_ORIGINS")
+if "*" in _cors_origins:
+    CORS_ALLOW_ALL_ORIGINS = True
+else:
+    CORS_ALLOWED_ORIGINS = _cors_origins
 CORS_ALLOW_CREDENTIALS = True
 
 cache_url = env("DJANGO_CACHE_URL")
@@ -269,6 +273,7 @@ REST_FRAMEWORK = {
         "ai_generation": env("DJANGO_THROTTLE_AI_GENERATION_RATE"),
         "user_creation": env("DJANGO_THROTTLE_USER_CREATION_RATE"),
     },
+    "EXCEPTION_HANDLER": "apps.core.exception_handler.custom_exception_handler",
     "DEFAULT_PAGINATION_CLASS": "apps.core.pagination.OptionalPageNumberPagination",
     "PAGE_SIZE": env("DJANGO_PAGE_SIZE"),
 }

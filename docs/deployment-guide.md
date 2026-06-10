@@ -116,11 +116,11 @@ VERCEL_PROJECT_ID
 
 Use `vercel env add` for production variables and `vercel env pull .env.local --environment=production` for local validation. Never commit `.env.local`.
 
-Current production frontend values:
+Set these in your hosting provider's environment:
 
 ```text
-NEXT_PUBLIC_SITE_URL=https://mentriq-erp.vercel.app
-NEXT_PUBLIC_API_BASE_URL=https://backend-nu-self-91.vercel.app/api/v1
+NEXT_PUBLIC_SITE_URL=https://app.your-domain.com
+NEXT_PUBLIC_API_BASE_URL=https://api.your-domain.com/api/v1
 ```
 
 ## Backend Deployment

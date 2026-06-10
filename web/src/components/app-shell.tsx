@@ -16,6 +16,7 @@ import {
   Menu,
   RadioTower,
   ReceiptText,
+  RefreshCcw,
   Rocket,
   School,
   ShieldCheck,
@@ -190,9 +191,14 @@ function initials(user: User) {
 function LoadingScreen() {
   return (
     <main className="flex min-h-screen items-center justify-center bg-page px-4">
-      <section className="surface w-full max-w-sm p-6 text-center shadow-soft">
+      <section className="surface w-full max-w-sm p-6 text-center shadow-soft animate-fade-up">
         <div className="flex justify-center">
-          <BrandLogo compact />
+          <BrandLogo compact animated />
+        </div>
+        <div className="mt-5 flex justify-center">
+          <span className="flex h-10 w-10 items-center justify-center rounded-full bg-accent-soft">
+            <RefreshCcw size={18} className="animate-spin text-accent-strong" />
+          </span>
         </div>
         <p className="mt-4 text-sm font-medium text-muted">Checking secure session...</p>
       </section>
@@ -269,37 +275,41 @@ function PasswordChangeGate({ user }: { user: User }) {
 
   return (
     <main className="flex min-h-screen items-center justify-center bg-page px-4">
-      <form onSubmit={submit} className="surface w-full max-w-md p-6 shadow-soft">
+      <form onSubmit={submit} className="surface w-full max-w-md p-6 shadow-soft animate-fade-up">
         <div className="flex items-start gap-3">
-          <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg bg-ink text-white">
-            <LockKeyhole size={18} />
+          <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-ink to-slate-800 text-white shadow-sm">
+            <LockKeyhole size={20} />
           </div>
           <div>
-            <h1 className="text-xl font-semibold text-ink">Change temporary password</h1>
+            <h1 className="text-xl font-bold text-ink">Change temporary password</h1>
             <p className="mt-1 text-sm leading-6 text-muted">
               {user.full_name || user.username}, create a new password before opening the dashboard.
             </p>
           </div>
         </div>
 
-        {error && <div className="mt-4 rounded-lg border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">{error}</div>}
+        {error && (
+          <div className="mt-4 rounded-lg border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700 animate-fade-in">
+            {error}
+          </div>
+        )}
 
         <div className="mt-5 space-y-4">
           <label className="block text-sm font-semibold text-ink">
             Temporary password
-            <input type="password" className="mt-1 w-full rounded-lg border border-line bg-white px-3 py-2.5 text-sm outline-none" value={currentPassword} onChange={(event) => setCurrentPassword(event.target.value)} required />
+            <input type="password" className="control-ring mt-1 w-full rounded-lg border border-line bg-white px-3 py-2.5 text-sm" value={currentPassword} onChange={(event) => setCurrentPassword(event.target.value)} required />
           </label>
           <label className="block text-sm font-semibold text-ink">
             New password
-            <input type="password" className="mt-1 w-full rounded-lg border border-line bg-white px-3 py-2.5 text-sm outline-none" value={newPassword} onChange={(event) => setNewPassword(event.target.value)} required minLength={8} />
+            <input type="password" className="control-ring mt-1 w-full rounded-lg border border-line bg-white px-3 py-2.5 text-sm" value={newPassword} onChange={(event) => setNewPassword(event.target.value)} required minLength={8} />
           </label>
           <label className="block text-sm font-semibold text-ink">
             Confirm new password
-            <input type="password" className="mt-1 w-full rounded-lg border border-line bg-white px-3 py-2.5 text-sm outline-none" value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} required minLength={8} />
+            <input type="password" className="control-ring mt-1 w-full rounded-lg border border-line bg-white px-3 py-2.5 text-sm" value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} required minLength={8} />
           </label>
         </div>
 
-        <button type="submit" disabled={busy} className="mt-6 w-full rounded-lg bg-ink px-4 py-3 text-sm font-semibold text-white disabled:opacity-60">
+        <button type="submit" disabled={busy} className="mt-6 w-full rounded-lg bg-ink px-4 py-3 text-sm font-semibold text-white transition-all duration-200 hover:bg-ink/90 hover:shadow-md active:scale-[0.98] disabled:opacity-60 disabled:active:scale-100">
           {busy ? "Updating..." : "Change password"}
         </button>
       </form>
@@ -310,13 +320,13 @@ function PasswordChangeGate({ user }: { user: User }) {
 function RoleGuardNotice({ user }: { user: User }) {
   return (
     <main className="flex min-h-screen items-center justify-center bg-page px-4">
-      <section className="surface w-full max-w-md p-6 text-center shadow-soft">
-        <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-lg bg-amber-50 text-amber-700">
-          <ShieldCheck size={22} />
+      <section className="surface w-full max-w-md p-6 text-center shadow-soft animate-fade-up">
+        <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl bg-amber-50 text-amber-700 ring-1 ring-amber-100">
+          <ShieldCheck size={24} />
         </div>
-        <h1 className="mt-4 text-xl font-semibold text-ink">Redirecting to your dashboard</h1>
+        <h1 className="mt-4 text-xl font-bold text-ink">Redirecting to your dashboard</h1>
         <p className="mt-2 text-sm leading-6 text-muted">
-          Your account is assigned to {ROLE_LABELS[user.role]}.
+          Your account is assigned to <strong className="text-ink">{ROLE_LABELS[user.role]}</strong>.
         </p>
       </section>
     </main>
@@ -339,7 +349,7 @@ function Sidebar({
   const primaryCampus = user.campuses?.find((campus) => campus.is_primary) ?? user.campuses?.[0];
 
   return (
-    <aside className="hidden min-h-screen w-72 shrink-0 border-r border-line/70 bg-white px-4 py-5 lg:sticky lg:top-0 lg:flex lg:flex-col">
+    <aside className="hidden min-h-screen w-72 shrink-0 border-r border-line/70 bg-white px-4 py-5 lg:sticky lg:top-0 lg:flex lg:flex-col animate-slide-right">
       <SchoolBrandLockup user={user} subtitle={user.role === "super_admin" ? "Super Admin" : "School ERP"} />
 
       <div className="mt-6 rounded-lg border border-line/70 bg-slate-50 p-3">
@@ -521,7 +531,7 @@ export function AppShell({ requiredRole }: { requiredRole?: DashboardRole }) {
     : defaultTabFor(user);
 
   return (
-    <div className="min-h-screen bg-page text-ink lg:flex">
+    <div className="min-h-screen bg-page text-ink lg:flex" key={currentTab}>
       <Sidebar
         user={user}
         navItems={navItems}
@@ -537,8 +547,8 @@ export function AppShell({ requiredRole }: { requiredRole?: DashboardRole }) {
           setActiveTab={setActiveTab}
           logout={logout}
         />
-        <main className="page-shell py-5 pb-28 lg:py-6">
-          <section className="mb-5 rounded-lg border border-line/70 bg-white px-4 py-4 shadow-sm md:px-5">
+        <main className="page-shell py-5 pb-28 lg:py-6 animate-fade-up">
+          <section className="mb-5 rounded-lg border border-line/70 bg-white px-4 py-4 shadow-sm md:px-5 hover-lift">
             <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
               <div>
                 <p className="text-xs font-semibold uppercase tracking-[0.16em] text-muted">{ROLE_LABELS[user.role]}</p>

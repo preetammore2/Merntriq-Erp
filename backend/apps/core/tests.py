@@ -312,8 +312,8 @@ class ERPRoleFlowTests(APITestCase):
             "is_enabled_for_staff": True,
             "server_required": True,
             "use_domain_name": True,
-            "domain_name": "device.nialabs.in",
-            "server_ip": "192.168.000.109",
+            "domain_name": "device.example.com",
+            "server_ip": "192.168.1.100",
             "server_port": 7743,
             "heartbeat_seconds": 3,
             "server_approval_required": False,
@@ -326,7 +326,7 @@ class ERPRoleFlowTests(APITestCase):
         response = self.client.post("/api/v1/attendance-devices/", payload, format="json")
 
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
-        self.assertEqual(response.data["domain_name"], "device.nialabs.in")
+        self.assertEqual(response.data["domain_name"], "device.example.com")
         self.assertEqual(response.data["server_port"], 7743)
         self.assertEqual(response.data["local_port"], 5005)
         self.assertEqual(response.data["baud_rate"], 38400)
@@ -1141,7 +1141,7 @@ class ERPRoleFlowTests(APITestCase):
         template = MessageTemplate.objects.get(campus=self.campus, trigger="fee_reminder", channel="email")
         render_response = self.client.post(
             f"/api/v1/message-templates/{template.id}/render/",
-            {"variables": {"studentName": self.student.full_name, "schoolName": self.campus.name, "feeAmount": "100", "dueDate": "2026-06-30", "paymentLink": "https://pay.example.com"}},
+            {"variables": {"studentName": self.student.full_name, "schoolName": self.campus.name, "feeAmount": "100", "dueDate": "2026-06-30", "paymentLink": "https://pay.example.org"}},
             format="json",
         )
         send_response = self.client.post(
@@ -1150,7 +1150,7 @@ class ERPRoleFlowTests(APITestCase):
                 "template": template.id,
                 "student": self.student.id,
                 "recipient": "parent@example.com",
-                "variables": {"feeAmount": "100", "dueDate": "2026-06-30", "paymentLink": "https://pay.example.com"},
+                "variables": {"feeAmount": "100", "dueDate": "2026-06-30", "paymentLink": "https://pay.example.org"},
             },
             format="json",
         )

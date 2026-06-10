@@ -172,7 +172,7 @@ class Command(BaseCommand):
                 "pincode": "411001",
                 "contact_email": "demo.school@mentriq360.example",
                 "contact_phone": "+91-90000-00001",
-                "website": "https://demo.mentriq360.example",
+                "website": "https://demo.example.com",
                 "principal_name": "Dr. Demo Principal",
                 "logo_url": svg_data_url("M360 Demo", "#0f766e"),
                 "logo_alt_text": "MentriQ360 demo school logo",
@@ -450,8 +450,8 @@ class Command(BaseCommand):
         gateway.save()
 
         self.communication(campus, MessageChannel.EMAIL, "Demo SMTP", school_admin, smtp_host="smtp.demo.example", smtp_port=587, smtp_username="demo@mentriq360.example", smtp_password="demo_smtp_password")
-        self.communication(campus, MessageChannel.SMS, "Demo SMS API", school_admin, api_url="https://sms.demo.example/send", api_key="demo_sms_key", api_secret="demo_sms_secret", sender_id="M360DM")
-        self.communication(campus, MessageChannel.WHATSAPP, "Demo WhatsApp API", school_admin, api_url="https://graph.demo.example/messages", api_key="demo_whatsapp_token", whatsapp_phone_number_id="demo-phone-number-id")
+        self.communication(campus, MessageChannel.SMS, "Demo SMS API", school_admin,                 api_url="https://sms.example.com/send", api_key="demo_sms_key", api_secret="demo_sms_secret", sender_id="M360DM")
+        self.communication(campus, MessageChannel.WHATSAPP, "Demo WhatsApp API", school_admin,                 api_url="https://graph.example.com/messages", api_key="demo_whatsapp_token", whatsapp_phone_number_id="demo-phone-number-id")
         self.message_template(campus, "Demo Fee Reminder", "fee_reminder", MessageChannel.EMAIL, "Fee reminder for {{studentName}}", "Dear {{studentName}}, {{schoolName}} has a pending fee of {{feeAmount}} due by {{dueDate}}.", school_admin)
         self.message_template(campus, "Demo Result Published", "result_published", MessageChannel.WHATSAPP, "", "Result is published for {{studentName}}. Download: {{resultLink}}", school_admin)
 

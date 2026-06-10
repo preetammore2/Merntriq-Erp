@@ -262,18 +262,26 @@ class AbuseGuardMiddleware:
 
         # ── Post-response checks (only for auth-related failures) ─────────
         if path.startswith("/api/v1/auth/token/") and status in (400, 401):
-            username = request.POST.get("username", request.data.get("username", "")) if hasattr(request, "data") else ""
+            username = ""
+            try:
+                if request.content_type and "json" in request.content_type:
+                    import json as _json
+                    try:
+                        body = _json.loads(request.body) if request.body else {}
+                        username = body.get("username", "")
+                    except Exception:
+                        username = request.POST.get("username", "")
+                else:
+                    username = request.POST.get("username", "")
+            except Exception:
+                username = ""
             if username:
                 velocity_result = _check_login_velocity(ip, username)
                 if velocity_result == "block":
                     logger.info("ABUSE_VELOCITY_BLOCKED %s %s", ip, username)
 
         # ── Auto-block if post-response metrics exceed aggressive limits ──
-        if status in (429, 403) and status == 429:
-            pass  # Already throttled; no need to double-count
-        elif status == 404:
-            _check_auto_block(ip)
-        else:
+        if status not in (429, 403):
             _check_auto_block(ip)
 
         return response

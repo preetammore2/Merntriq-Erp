@@ -100,10 +100,10 @@ python manage.py check --deploy
 
 The repository also includes `.github/workflows/production-qa.yml` to run backend checks/tests and frontend lint/type/build in CI.
 
-## Vercel and Cloudflare Notes
+## Deployment Notes
 
-- Deploy the frontend from `web/`; `web/vercel.json` pins the Next.js build command and security headers.
-- Deploy the backend from `backend/` with `DJANGO_SETTINGS_MODULE=config.settings.vercel` only when a managed database is configured through `DATABASE_URL`.
+- Deploy the frontend from `web/` with `NEXT_PUBLIC_API_BASE_URL` set to your backend URL.
+- Deploy the backend from `backend/` using `config.settings.production` and a managed database.
 - Use Cloudflare or another edge/WAF layer for SSL, custom domains, DDoS protection, and request-rate policies.
 - Do not give preview deployments production database credentials unless the preview is a controlled staging environment.
 - Run database migrations before production promotion, then promote the already-verified preview artifact.
