@@ -7,16 +7,14 @@ from .models import User
 
 @admin.register(User)
 class ERPUserAdmin(UserAdmin):
-    list_display = ("username", "email", "role", "school", "is_staff", "is_active")
-    list_filter = ("role", "school", "is_staff", "is_active")
+    list_display = ("username", "email", "role", "is_staff", "is_active")
+    list_filter = ("role", "is_staff", "is_active")
     fieldsets = UserAdmin.fieldsets + (
         (
             "ERP Access",
             {
                 "fields": (
                     "role",
-                    "school",
-                    "phone_number",
                     "must_change_password",
                 )
             },

@@ -5,6 +5,7 @@ from django.db.models import Q, Sum
 from django.conf import settings
 from django.db import connections
 from rest_framework import serializers
+from rest_framework_mongoengine.serializers import DocumentSerializer
 
 from apps.accounts.models import User, UserRole
 
@@ -94,7 +95,7 @@ from .models import (
 )
 
 
-class CampusSerializer(serializers.ModelSerializer):
+class CampusSerializer(DocumentSerializer):
     class Meta:
         model = Campus
         fields = (
@@ -197,7 +198,7 @@ def school_connection_status(campus: Campus) -> dict:
     }
 
 
-class SchoolSerializer(serializers.ModelSerializer):
+class SchoolSerializer(DocumentSerializer):
     schoolId = serializers.IntegerField(source="id", read_only=True)
     schoolCode = serializers.CharField(source="code", required=False)
     schoolName = serializers.CharField(source="name")
@@ -247,7 +248,8 @@ class SchoolSerializer(serializers.ModelSerializer):
         )
 
     def get_totalStudents(self, obj: Campus) -> int:
-        return obj.students.count()
+        from apps.core.models import Student
+        return Student.objects.filter(campus_id=obj.id).count()
 
     def validate_logo(self, value: str) -> str:
         cleaned = (value or "").strip()
@@ -271,17 +273,26 @@ class SchoolSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("Banner is too large. Use an image below 1 MB.")
         return cleaned
 
-    def scoped_users(self, obj: Campus):
-        return User.objects.filter(Q(school=obj) | Q(campus_memberships__campus=obj)).distinct()
+    def scoped_user_ids(self, obj: Campus) -> set:
+        from apps.core.models import CampusMembership, StaffProfile, Student
+
+        member_ids = CampusMembership.objects.filter(campus_id=obj.id).values_list("user_id", flat=True)
+        staff_ids = StaffProfile.objects.filter(campus_id=obj.id).values_list("user_id", flat=True)
+        student_ids = Student.objects.filter(campus_id=obj.id).values_list("user_id", flat=True)
+        return set(member_ids) | set(staff_ids) | set(student_ids)
 
     def get_totalTeachers(self, obj: Campus) -> int:
-        return self.scoped_users(obj).filter(role=UserRole.TEACHER).count()
+        return User.objects.filter(pk__in=list(self.scoped_user_ids(obj)), role=UserRole.TEACHER).count()
 
     def get_totalStaff(self, obj: Campus) -> int:
-        return self.scoped_users(obj).exclude(role__in=[UserRole.STUDENT, UserRole.SUPER_ADMIN]).count()
+        return (
+            User.objects.filter(pk__in=list(self.scoped_user_ids(obj)))
+            .exclude(role__in=[UserRole.STUDENT, UserRole.SUPER_ADMIN])
+            .count()
+        )
 
     def get_schoolAdmins(self, obj: Campus) -> int:
-        return self.scoped_users(obj).filter(role=UserRole.SCHOOL_ADMIN).count()
+        return User.objects.filter(pk__in=list(self.scoped_user_ids(obj)), role=UserRole.SCHOOL_ADMIN).count()
 
     def get_databaseConnectionStatus(self, obj: Campus) -> dict:
         request = self.context.get("request")
@@ -299,7 +310,7 @@ class SchoolProfileSerializer(SchoolSerializer):
         )
 
 
-class CampusMembershipSerializer(serializers.ModelSerializer):
+class CampusMembershipSerializer(DocumentSerializer):
     campus_name = serializers.CharField(source="campus.name", read_only=True)
     user_name = serializers.SerializerMethodField()
     user_role = serializers.CharField(source="user.role", read_only=True)
@@ -331,13 +342,13 @@ class CampusMembershipSerializer(serializers.ModelSerializer):
         if user and user.role == UserRole.SUPER_ADMIN:
             raise serializers.ValidationError({"user": "Super Admin accounts are global and cannot be assigned to a school."})
         if user and campus:
-            existing = CampusMembership.objects.filter(user=user).exclude(pk=getattr(self.instance, "pk", None))
+            existing = CampusMembership.objects.filter(user_id=user.pk).exclude(pk=getattr(self.instance, "pk", None))
             if existing.exclude(campus=campus).exists() or (user.school_id and user.school_id != campus.id):
                 raise serializers.ValidationError({"campus": "Every user can belong to only one school."})
         return attrs
 
 
-class AttendanceDeviceSerializer(serializers.ModelSerializer):
+class AttendanceDeviceSerializer(DocumentSerializer):
     campus_name = serializers.CharField(source="campus.name", read_only=True)
     configured_by_name = serializers.SerializerMethodField()
 
@@ -381,8 +392,8 @@ class AttendanceDeviceSerializer(serializers.ModelSerializer):
 
     def validate(self, attrs):
         instance = self.instance
-        default_domain_name = AttendanceDevice._meta.get_field("domain_name").default
-        default_server_ip = AttendanceDevice._meta.get_field("server_ip").default
+        default_domain_name = AttendanceDevice._fields["domain_name"].default
+        default_server_ip = AttendanceDevice._fields["server_ip"].default
         server_required = attrs.get("server_required", getattr(instance, "server_required", True))
         use_domain_name = attrs.get("use_domain_name", getattr(instance, "use_domain_name", True))
         domain_name = attrs.get("domain_name", getattr(instance, "domain_name", default_domain_name)).strip()
@@ -397,7 +408,7 @@ class AttendanceDeviceSerializer(serializers.ModelSerializer):
         return attrs
 
 
-class AcademicSessionSerializer(serializers.ModelSerializer):
+class AcademicSessionSerializer(DocumentSerializer):
     campus_name = serializers.CharField(source="campus.name", read_only=True)
 
     class Meta:
@@ -416,7 +427,7 @@ class AcademicSessionSerializer(serializers.ModelSerializer):
         read_only_fields = ("created_at", "updated_at")
 
 
-class ClassSectionSerializer(serializers.ModelSerializer):
+class ClassSectionSerializer(DocumentSerializer):
     campus_name = serializers.CharField(source="campus.name", read_only=True)
     class_teacher_name = serializers.SerializerMethodField()
     label = serializers.SerializerMethodField()
@@ -454,7 +465,7 @@ class ClassSectionSerializer(serializers.ModelSerializer):
         return attrs
 
 
-class TeacherSubjectAllocationSerializer(serializers.ModelSerializer):
+class TeacherSubjectAllocationSerializer(DocumentSerializer):
     campus_name = serializers.CharField(source="campus.name", read_only=True)
     section_label = serializers.SerializerMethodField()
     teacher_name = serializers.SerializerMethodField()
@@ -500,7 +511,7 @@ class TeacherSubjectAllocationSerializer(serializers.ModelSerializer):
         return attrs
 
 
-class SubjectSerializer(serializers.ModelSerializer):
+class SubjectSerializer(DocumentSerializer):
     campus_name = serializers.CharField(source="campus.name", read_only=True)
 
     class Meta:
@@ -529,7 +540,7 @@ class SubjectSerializer(serializers.ModelSerializer):
         return (value or "").strip().upper()
 
 
-class StudentSerializer(serializers.ModelSerializer):
+class StudentSerializer(DocumentSerializer):
     full_name = serializers.ReadOnlyField()
     campus_name = serializers.CharField(source="campus.name", read_only=True)
     section_label = serializers.SerializerMethodField()
@@ -584,7 +595,7 @@ class StudentSerializer(serializers.ModelSerializer):
         return attrs
 
 
-class AttendanceRecordSerializer(serializers.ModelSerializer):
+class AttendanceRecordSerializer(DocumentSerializer):
     student_name = serializers.CharField(source="student.full_name", read_only=True)
     section_label = serializers.SerializerMethodField()
     device_name = serializers.CharField(source="device.name", read_only=True)
@@ -644,7 +655,7 @@ class AttendanceRecordSerializer(serializers.ModelSerializer):
         return attrs
 
 
-class StaffAttendanceRecordSerializer(serializers.ModelSerializer):
+class StaffAttendanceRecordSerializer(DocumentSerializer):
     campus_name = serializers.CharField(source="campus.name", read_only=True)
     staff_name = serializers.SerializerMethodField()
     staff_role = serializers.CharField(source="staff_user.role", read_only=True)
@@ -699,7 +710,7 @@ class StaffAttendanceRecordSerializer(serializers.ModelSerializer):
         return attrs
 
 
-class StaffProfileSerializer(serializers.ModelSerializer):
+class StaffProfileSerializer(DocumentSerializer):
     campus_name = serializers.CharField(source="campus.name", read_only=True)
     user_name = serializers.SerializerMethodField()
     user_role = serializers.CharField(source="user.role", read_only=True)
@@ -737,7 +748,7 @@ class StaffProfileSerializer(serializers.ModelSerializer):
         return attrs
 
 
-class TimetableSlotSerializer(serializers.ModelSerializer):
+class TimetableSlotSerializer(DocumentSerializer):
     campus_name = serializers.CharField(source="campus.name", read_only=True)
     section_label = serializers.SerializerMethodField()
     teacher_name = serializers.SerializerMethodField()
@@ -797,7 +808,7 @@ class TimetableSlotSerializer(serializers.ModelSerializer):
         return attrs
 
 
-class ExamTypeSerializer(serializers.ModelSerializer):
+class ExamTypeSerializer(DocumentSerializer):
     campus_name = serializers.CharField(source="campus.name", read_only=True)
 
     class Meta:
@@ -821,7 +832,7 @@ class ExamTypeSerializer(serializers.ModelSerializer):
         return name
 
 
-class ExamSubjectSetupSerializer(serializers.ModelSerializer):
+class ExamSubjectSetupSerializer(DocumentSerializer):
     campus_name = serializers.CharField(source="campus.name", read_only=True)
     exam_type_name = serializers.CharField(source="exam_type.name", read_only=True)
     section_label = serializers.SerializerMethodField()
@@ -874,7 +885,7 @@ class ExamSubjectSetupSerializer(serializers.ModelSerializer):
         return attrs
 
 
-class ExamScheduleSerializer(serializers.ModelSerializer):
+class ExamScheduleSerializer(DocumentSerializer):
     campus_name = serializers.CharField(source="campus.name", read_only=True)
     exam_type_name = serializers.CharField(source="exam_type.name", read_only=True)
     section_label = serializers.SerializerMethodField()
@@ -941,7 +952,7 @@ class ExamScheduleSerializer(serializers.ModelSerializer):
         return attrs
 
 
-class LibraryBookSerializer(serializers.ModelSerializer):
+class LibraryBookSerializer(DocumentSerializer):
     campus_name = serializers.CharField(source="campus.name", read_only=True)
 
     class Meta:
@@ -972,7 +983,7 @@ class LibraryBookSerializer(serializers.ModelSerializer):
         return attrs
 
 
-class LibraryLoanSerializer(serializers.ModelSerializer):
+class LibraryLoanSerializer(DocumentSerializer):
     campus_name = serializers.CharField(source="campus.name", read_only=True)
     book_title = serializers.CharField(source="book.title", read_only=True)
     borrower_name = serializers.SerializerMethodField()
@@ -1031,7 +1042,7 @@ class LibraryLoanSerializer(serializers.ModelSerializer):
         return attrs
 
 
-class TransportRouteSerializer(serializers.ModelSerializer):
+class TransportRouteSerializer(DocumentSerializer):
     campus_name = serializers.CharField(source="campus.name", read_only=True)
 
     class Meta:
@@ -1052,7 +1063,7 @@ class TransportRouteSerializer(serializers.ModelSerializer):
         read_only_fields = ("created_at", "updated_at")
 
 
-class TransportVehicleSerializer(serializers.ModelSerializer):
+class TransportVehicleSerializer(DocumentSerializer):
     campus_name = serializers.CharField(source="campus.name", read_only=True)
     route_name = serializers.CharField(source="route.name", read_only=True)
 
@@ -1083,7 +1094,7 @@ class TransportVehicleSerializer(serializers.ModelSerializer):
         return attrs
 
 
-class StudentTransportAssignmentSerializer(serializers.ModelSerializer):
+class StudentTransportAssignmentSerializer(DocumentSerializer):
     student_name = serializers.CharField(source="student.full_name", read_only=True)
     route_name = serializers.CharField(source="route.name", read_only=True)
     vehicle_number = serializers.CharField(source="vehicle.vehicle_number", read_only=True)
@@ -1127,7 +1138,7 @@ class StudentTransportAssignmentSerializer(serializers.ModelSerializer):
         return attrs
 
 
-class HostelRoomSerializer(serializers.ModelSerializer):
+class HostelRoomSerializer(DocumentSerializer):
     campus_name = serializers.CharField(source="campus.name", read_only=True)
 
     class Meta:
@@ -1147,7 +1158,7 @@ class HostelRoomSerializer(serializers.ModelSerializer):
         read_only_fields = ("created_at", "updated_at")
 
 
-class HostelAllocationSerializer(serializers.ModelSerializer):
+class HostelAllocationSerializer(DocumentSerializer):
     student_name = serializers.CharField(source="student.full_name", read_only=True)
     room_label = serializers.SerializerMethodField()
 
@@ -1187,7 +1198,7 @@ class HostelAllocationSerializer(serializers.ModelSerializer):
         return attrs
 
 
-class AssignedWorkSerializer(serializers.ModelSerializer):
+class AssignedWorkSerializer(DocumentSerializer):
     section_label = serializers.SerializerMethodField()
     assigned_by_name = serializers.SerializerMethodField()
     submission_count = serializers.IntegerField(read_only=True)
@@ -1244,7 +1255,7 @@ class AssignedWorkSerializer(serializers.ModelSerializer):
         return attrs
 
 
-class AssignmentSubmissionSerializer(serializers.ModelSerializer):
+class AssignmentSubmissionSerializer(DocumentSerializer):
     assignment_title = serializers.CharField(source="assignment.title", read_only=True)
     assignment_subject = serializers.CharField(source="assignment.subject", read_only=True)
     section_label = serializers.SerializerMethodField()
@@ -1317,7 +1328,7 @@ class AssignmentSubmissionSerializer(serializers.ModelSerializer):
         return attrs
 
 
-class LearningResourceSerializer(serializers.ModelSerializer):
+class LearningResourceSerializer(DocumentSerializer):
     section_label = serializers.SerializerMethodField()
     uploaded_by_name = serializers.SerializerMethodField()
 
@@ -1372,7 +1383,7 @@ class LearningResourceSerializer(serializers.ModelSerializer):
         return attrs
 
 
-class ResultRecordSerializer(serializers.ModelSerializer):
+class ResultRecordSerializer(DocumentSerializer):
     student_name = serializers.CharField(source="student.full_name", read_only=True)
     section_label = serializers.SerializerMethodField()
     recorded_by_name = serializers.SerializerMethodField()
@@ -1467,7 +1478,7 @@ class ResultRecordSerializer(serializers.ModelSerializer):
         return attrs
 
 
-class AdmitCardSerializer(serializers.ModelSerializer):
+class AdmitCardSerializer(DocumentSerializer):
     student_name = serializers.CharField(source="student.full_name", read_only=True)
     admission_number = serializers.CharField(source="student.admission_number", read_only=True)
     section_label = serializers.SerializerMethodField()
@@ -1513,7 +1524,7 @@ class AdmitCardSerializer(serializers.ModelSerializer):
         return attrs
 
 
-class FeeStructureSerializer(serializers.ModelSerializer):
+class FeeStructureSerializer(DocumentSerializer):
     campus_name = serializers.CharField(source="campus.name", read_only=True)
     section_label = serializers.SerializerMethodField()
     created_by_name = serializers.SerializerMethodField()
@@ -1569,7 +1580,7 @@ class FeeStructureSerializer(serializers.ModelSerializer):
         return attrs
 
 
-class PaymentGatewayConfigSerializer(serializers.ModelSerializer):
+class PaymentGatewayConfigSerializer(DocumentSerializer):
     campus_name = serializers.CharField(source="campus.name", read_only=True)
     masked_key_id = serializers.SerializerMethodField()
     key_secret = serializers.CharField(write_only=True, required=False, allow_blank=True, trim_whitespace=False)
@@ -1619,7 +1630,7 @@ class PaymentGatewayConfigSerializer(serializers.ModelSerializer):
             instance.set_webhook_secret(webhook_secret)
             changed.append("webhook_secret_encrypted")
         if changed:
-            instance.save(update_fields=changed + ["updated_at"])
+            instance.save()
         return instance
 
     def update(self, instance, validated_data):
@@ -1634,11 +1645,11 @@ class PaymentGatewayConfigSerializer(serializers.ModelSerializer):
             instance.set_webhook_secret(webhook_secret)
             changed.append("webhook_secret_encrypted")
         if changed:
-            instance.save(update_fields=changed + ["updated_at"])
+            instance.save()
         return instance
 
 
-class FeeAssignmentSerializer(serializers.ModelSerializer):
+class FeeAssignmentSerializer(DocumentSerializer):
     fee_structure_title = serializers.CharField(source="fee_structure.title", read_only=True)
     student_name = serializers.CharField(source="student.full_name", read_only=True)
     section_label = serializers.SerializerMethodField()
@@ -1677,11 +1688,13 @@ class FeeAssignmentSerializer(serializers.ModelSerializer):
         return f"{obj.student.section.grade_name} - {obj.student.section.section_name}"
 
     def get_amount_paid(self, obj: FeeAssignment) -> str:
-        paid = obj.payments.aggregate(total=Sum("amount_paid")).get("total") or 0
+        from apps.core.models import Payment
+        paid = Payment.objects.filter(fee_assignment_id=obj.id).aggregate(total=Sum("amount")).get("total") or 0
         return str(paid)
 
     def get_outstanding_amount(self, obj: FeeAssignment) -> str:
-        paid = obj.payments.aggregate(total=Sum("amount_paid")).get("total") or 0
+        from apps.core.models import Payment
+        paid = Payment.objects.filter(fee_assignment_id=obj.id).aggregate(total=Sum("amount")).get("total") or 0
         return str(max(obj.payable_amount - paid, 0))
 
     def get_payable_amount(self, obj: FeeAssignment) -> str:
@@ -1705,7 +1718,7 @@ class FeeAssignmentSerializer(serializers.ModelSerializer):
         return attrs
 
 
-class PaymentSerializer(serializers.ModelSerializer):
+class PaymentSerializer(DocumentSerializer):
     campus = serializers.PrimaryKeyRelatedField(read_only=True)
     campus_name = serializers.CharField(source="campus.name", read_only=True)
     fee_title = serializers.CharField(source="fee_assignment.title", read_only=True)
@@ -1779,7 +1792,7 @@ class PaymentSerializer(serializers.ModelSerializer):
         return attrs
 
 
-class PaymentTransactionSerializer(serializers.ModelSerializer):
+class PaymentTransactionSerializer(DocumentSerializer):
     campus_name = serializers.CharField(source="campus.name", read_only=True)
     student_name = serializers.CharField(source="student.full_name", read_only=True)
     fee_title = serializers.CharField(source="fee_assignment.title", read_only=True)
@@ -1850,7 +1863,7 @@ class PaymentTransactionSerializer(serializers.ModelSerializer):
         return attrs
 
 
-class SalarySetupSerializer(serializers.ModelSerializer):
+class SalarySetupSerializer(DocumentSerializer):
     campus_name = serializers.CharField(source="campus.name", read_only=True)
     staff_name = serializers.SerializerMethodField()
     staff_role = serializers.CharField(source="staff_user.role", read_only=True)
@@ -1900,7 +1913,7 @@ class SalarySetupSerializer(serializers.ModelSerializer):
         return attrs
 
 
-class SalaryRecordSerializer(serializers.ModelSerializer):
+class SalaryRecordSerializer(DocumentSerializer):
     campus_name = serializers.CharField(source="campus.name", read_only=True)
     staff_name = serializers.SerializerMethodField()
     staff_role = serializers.CharField(source="staff_user.role", read_only=True)
@@ -1961,7 +1974,7 @@ class SalaryRecordSerializer(serializers.ModelSerializer):
         return attrs
 
 
-class FinanceEventSerializer(serializers.ModelSerializer):
+class FinanceEventSerializer(DocumentSerializer):
     campus_name = serializers.CharField(source="campus.name", read_only=True)
     created_by_name = serializers.SerializerMethodField()
 
@@ -1986,7 +1999,7 @@ class FinanceEventSerializer(serializers.ModelSerializer):
         return obj.created_by.get_full_name() or obj.created_by.username
 
 
-class AcademicEventSerializer(serializers.ModelSerializer):
+class AcademicEventSerializer(DocumentSerializer):
     campus_name = serializers.CharField(source="campus.name", read_only=True)
     student_name = serializers.CharField(source="student.full_name", read_only=True)
     teacher_name = serializers.SerializerMethodField()
@@ -2022,7 +2035,7 @@ class AcademicEventSerializer(serializers.ModelSerializer):
         return obj.created_by.get_full_name() or obj.created_by.username
 
 
-class MessageTemplateSerializer(serializers.ModelSerializer):
+class MessageTemplateSerializer(DocumentSerializer):
     campus_name = serializers.CharField(source="campus.name", read_only=True)
     created_by_name = serializers.SerializerMethodField()
 
@@ -2052,7 +2065,7 @@ class MessageTemplateSerializer(serializers.ModelSerializer):
         return obj.created_by.get_full_name() or obj.created_by.username
 
 
-class CommunicationSettingSerializer(serializers.ModelSerializer):
+class CommunicationSettingSerializer(DocumentSerializer):
     campus_name = serializers.CharField(source="campus.name", read_only=True)
     created_by_name = serializers.SerializerMethodField()
     has_api_key = serializers.SerializerMethodField()
@@ -2122,7 +2135,7 @@ class CommunicationSettingSerializer(serializers.ModelSerializer):
             instance.set_smtp_password(smtp_password)
             changed.append("smtp_password")
         if changed:
-            instance.save(update_fields=changed + ["updated_at"])
+            instance.save()
         return instance
 
     def update(self, instance, validated_data):
@@ -2141,11 +2154,11 @@ class CommunicationSettingSerializer(serializers.ModelSerializer):
             instance.set_smtp_password(smtp_password)
             changed.append("smtp_password")
         if changed:
-            instance.save(update_fields=changed + ["updated_at"])
+            instance.save()
         return instance
 
 
-class OutboundMessageSerializer(serializers.ModelSerializer):
+class OutboundMessageSerializer(DocumentSerializer):
     campus_name = serializers.CharField(source="campus.name", read_only=True)
     template_name = serializers.CharField(source="template.name", read_only=True)
     recipient_user_name = serializers.SerializerMethodField()
@@ -2201,7 +2214,7 @@ class OutboundMessageSerializer(serializers.ModelSerializer):
         return attrs
 
 
-class DeviceSyncLogSerializer(serializers.ModelSerializer):
+class DeviceSyncLogSerializer(DocumentSerializer):
     campus_name = serializers.CharField(source="campus.name", read_only=True)
     device_name = serializers.CharField(source="device.name", read_only=True)
     device_code = serializers.CharField(source="device.device_code", read_only=True)
@@ -2242,7 +2255,7 @@ class DeviceSyncLogSerializer(serializers.ModelSerializer):
         return attrs
 
 
-class AILogSerializer(serializers.ModelSerializer):
+class AILogSerializer(DocumentSerializer):
     campus_name = serializers.CharField(source="campus.name", read_only=True)
     user_name = serializers.SerializerMethodField()
     created_by_name = serializers.SerializerMethodField()
@@ -2279,7 +2292,7 @@ class AILogSerializer(serializers.ModelSerializer):
         return obj.created_by.get_full_name() or obj.created_by.username
 
 
-class DocumentSerializer(serializers.ModelSerializer):
+class DocumentSerializer(DocumentSerializer):
     campus_name = serializers.CharField(source="campus.name", read_only=True)
     student_name = serializers.CharField(source="student.full_name", read_only=True)
     staff_user_name = serializers.SerializerMethodField()
@@ -2337,7 +2350,7 @@ class DocumentSerializer(serializers.ModelSerializer):
         return attrs
 
 
-class SaaSPlanSerializer(serializers.ModelSerializer):
+class SaaSPlanSerializer(DocumentSerializer):
     enabled_module_count = serializers.SerializerMethodField()
 
     class Meta:
@@ -2369,7 +2382,7 @@ class SaaSPlanSerializer(serializers.ModelSerializer):
         return sum(1 for value in (obj.modules or {}).values() if value)
 
 
-class SchoolSubscriptionSerializer(serializers.ModelSerializer):
+class SchoolSubscriptionSerializer(DocumentSerializer):
     campus_name = serializers.CharField(source="campus.name", read_only=True)
     campus_code = serializers.CharField(source="campus.code", read_only=True)
     plan_name = serializers.CharField(source="plan.name", read_only=True)
@@ -2425,7 +2438,7 @@ class SchoolSubscriptionSerializer(serializers.ModelSerializer):
         return attrs
 
 
-class SubscriptionInvoiceSerializer(serializers.ModelSerializer):
+class SubscriptionInvoiceSerializer(DocumentSerializer):
     campus_name = serializers.CharField(source="campus.name", read_only=True)
     plan_name = serializers.CharField(source="subscription.plan.name", read_only=True)
     paid_amount = serializers.SerializerMethodField()
@@ -2461,15 +2474,17 @@ class SubscriptionInvoiceSerializer(serializers.ModelSerializer):
         read_only_fields = ("gst_amount", "total_amount", "paid_at", "created_by", "created_at", "updated_at")
 
     def get_paid_amount(self, obj: SubscriptionInvoice) -> str:
-        total = obj.payments.filter(payment_status="success").aggregate(total=Sum("amount")).get("total") or Decimal("0")
+        from apps.core.models import SubscriptionPayment
+        total = SubscriptionPayment.objects.filter(invoice_id=obj.id, payment_status="success").aggregate(total=Sum("amount")).get("total") or Decimal("0")
         return str(total)
 
     def get_outstanding_amount(self, obj: SubscriptionInvoice) -> str:
-        total = obj.payments.filter(payment_status="success").aggregate(total=Sum("amount")).get("total") or Decimal("0")
+        from apps.core.models import SubscriptionPayment
+        total = SubscriptionPayment.objects.filter(invoice_id=obj.id, payment_status="success").aggregate(total=Sum("amount")).get("total") or Decimal("0")
         return str(max(obj.total_amount - total, Decimal("0")))
 
 
-class SubscriptionPaymentSerializer(serializers.ModelSerializer):
+class SubscriptionPaymentSerializer(DocumentSerializer):
     campus_name = serializers.CharField(source="campus.name", read_only=True)
     invoice_number = serializers.CharField(source="invoice.invoice_number", read_only=True)
 
@@ -2495,7 +2510,7 @@ class SubscriptionPaymentSerializer(serializers.ModelSerializer):
         read_only_fields = ("created_by", "created_at", "updated_at")
 
 
-class WhiteLabelConfigSerializer(serializers.ModelSerializer):
+class WhiteLabelConfigSerializer(DocumentSerializer):
     campus_name = serializers.CharField(source="campus.name", read_only=True)
     plan_code = serializers.SerializerMethodField()
 
@@ -2540,7 +2555,7 @@ class WhiteLabelConfigSerializer(serializers.ModelSerializer):
         return attrs
 
 
-class UserActivityLogSerializer(serializers.ModelSerializer):
+class UserActivityLogSerializer(DocumentSerializer):
     campus_name = serializers.CharField(source="campus.name", read_only=True)
     user_name = serializers.SerializerMethodField()
 
@@ -2570,7 +2585,7 @@ class UserActivityLogSerializer(serializers.ModelSerializer):
         return obj.user.get_full_name() or obj.user.username
 
 
-class DocumentAccessLogSerializer(serializers.ModelSerializer):
+class DocumentAccessLogSerializer(DocumentSerializer):
     campus_name = serializers.CharField(source="campus.name", read_only=True)
     user_name = serializers.SerializerMethodField()
     student_name = serializers.CharField(source="student.full_name", read_only=True)
@@ -2603,7 +2618,7 @@ class DocumentAccessLogSerializer(serializers.ModelSerializer):
         return obj.user.get_full_name() or obj.user.username
 
 
-class EnterpriseUsageMetricSerializer(serializers.ModelSerializer):
+class EnterpriseUsageMetricSerializer(DocumentSerializer):
     campus_name = serializers.CharField(source="campus.name", read_only=True)
 
     class Meta:
@@ -2611,7 +2626,7 @@ class EnterpriseUsageMetricSerializer(serializers.ModelSerializer):
         fields = ("id", "campus", "campus_name", "metric_type", "period_start", "period_end", "quantity", "metadata", "created_at", "updated_at")
 
 
-class BackupPolicySerializer(serializers.ModelSerializer):
+class BackupPolicySerializer(DocumentSerializer):
     campus_name = serializers.CharField(source="campus.name", read_only=True)
 
     class Meta:
@@ -2620,7 +2635,7 @@ class BackupPolicySerializer(serializers.ModelSerializer):
         read_only_fields = ("created_by", "created_at", "updated_at")
 
 
-class BackupJobSerializer(serializers.ModelSerializer):
+class BackupJobSerializer(DocumentSerializer):
     campus_name = serializers.CharField(source="campus.name", read_only=True)
     policy_label = serializers.CharField(source="policy.backup_type", read_only=True)
 
@@ -2630,7 +2645,7 @@ class BackupJobSerializer(serializers.ModelSerializer):
         read_only_fields = ("created_by", "created_at", "updated_at")
 
 
-class QueueJobSerializer(serializers.ModelSerializer):
+class QueueJobSerializer(DocumentSerializer):
     campus_name = serializers.CharField(source="campus.name", read_only=True)
 
     class Meta:
@@ -2639,7 +2654,7 @@ class QueueJobSerializer(serializers.ModelSerializer):
         read_only_fields = ("created_by", "created_at", "updated_at")
 
 
-class SystemHealthSnapshotSerializer(serializers.ModelSerializer):
+class SystemHealthSnapshotSerializer(DocumentSerializer):
     campus_name = serializers.CharField(source="campus.name", read_only=True)
 
     class Meta:
@@ -2647,7 +2662,7 @@ class SystemHealthSnapshotSerializer(serializers.ModelSerializer):
         fields = ("id", "campus", "campus_name", "component", "status", "latency_ms", "metric_value", "message", "metadata", "checked_at", "created_at", "updated_at")
 
 
-class SecureAPITokenSerializer(serializers.ModelSerializer):
+class SecureAPITokenSerializer(DocumentSerializer):
     campus_name = serializers.CharField(source="campus.name", read_only=True)
     raw_token = serializers.CharField(write_only=True, required=False, allow_blank=True)
 
@@ -2665,7 +2680,7 @@ class SecureAPITokenSerializer(serializers.ModelSerializer):
         return instance
 
 
-class PlatformSettingSerializer(serializers.ModelSerializer):
+class PlatformSettingSerializer(DocumentSerializer):
     campus_name = serializers.CharField(source="campus.name", read_only=True)
     created_by_name = serializers.SerializerMethodField()
 
@@ -2691,7 +2706,7 @@ class PlatformSettingSerializer(serializers.ModelSerializer):
         return obj.created_by.get_full_name() or obj.created_by.username
 
 
-class AuditEventSerializer(serializers.ModelSerializer):
+class AuditEventSerializer(DocumentSerializer):
     actor_name = serializers.SerializerMethodField()
 
     class Meta:
@@ -2716,7 +2731,7 @@ class AuditEventSerializer(serializers.ModelSerializer):
         return obj.actor.get_full_name() or obj.actor.username
 
 
-class ApprovalRequestSerializer(serializers.ModelSerializer):
+class ApprovalRequestSerializer(DocumentSerializer):
     campus_name = serializers.CharField(source="campus.name", read_only=True)
     requested_by_name = serializers.SerializerMethodField()
     reviewed_by_name = serializers.SerializerMethodField()
@@ -2763,7 +2778,7 @@ class ApprovalRequestSerializer(serializers.ModelSerializer):
         return obj.reviewed_by.get_full_name() or obj.reviewed_by.username
 
 
-class AnnouncementSerializer(serializers.ModelSerializer):
+class AnnouncementSerializer(DocumentSerializer):
     campus_name = serializers.CharField(source="campus.name", read_only=True)
     created_by_name = serializers.SerializerMethodField()
 
@@ -2800,7 +2815,7 @@ class AnnouncementSerializer(serializers.ModelSerializer):
         return attrs
 
 
-class SupportTicketSerializer(serializers.ModelSerializer):
+class SupportTicketSerializer(DocumentSerializer):
     campus_name = serializers.CharField(source="campus.name", read_only=True)
     created_by_name = serializers.SerializerMethodField()
     created_by_role = serializers.CharField(source="created_by.role", read_only=True)
@@ -2847,7 +2862,7 @@ class SupportTicketSerializer(serializers.ModelSerializer):
         return obj.reviewed_by.get_full_name() or obj.reviewed_by.username
 
 
-class AdmissionFormTemplateSerializer(serializers.ModelSerializer):
+class AdmissionFormTemplateSerializer(DocumentSerializer):
     campus_name = serializers.CharField(source="campus.name", read_only=True)
 
     class Meta:
@@ -2874,7 +2889,7 @@ class AdmissionFormTemplateSerializer(serializers.ModelSerializer):
         return value
 
 
-class AdmissionApplicationSerializer(serializers.ModelSerializer):
+class AdmissionApplicationSerializer(DocumentSerializer):
     campus_name = serializers.CharField(source="campus.name", read_only=True)
     form_name = serializers.CharField(source="form_template.name", read_only=True)
     section_label = serializers.SerializerMethodField()
@@ -2938,7 +2953,7 @@ class AdmissionApplicationSerializer(serializers.ModelSerializer):
         return attrs
 
 
-class AdmissionDocumentSerializer(serializers.ModelSerializer):
+class AdmissionDocumentSerializer(DocumentSerializer):
     application_number = serializers.CharField(source="application.application_number", read_only=True)
     campus = serializers.IntegerField(source="application.campus_id", read_only=True)
     campus_name = serializers.CharField(source="application.campus.name", read_only=True)
@@ -2963,7 +2978,7 @@ class AdmissionDocumentSerializer(serializers.ModelSerializer):
         read_only_fields = ("uploaded_by", "created_at", "updated_at")
 
 
-class TransportDriverSerializer(serializers.ModelSerializer):
+class TransportDriverSerializer(DocumentSerializer):
     campus_name = serializers.CharField(source="campus.name", read_only=True)
     user_name = serializers.SerializerMethodField()
 
@@ -2985,7 +3000,7 @@ class TransportDriverSerializer(serializers.ModelSerializer):
         return attrs
 
 
-class TransportVehicleAttendanceSerializer(serializers.ModelSerializer):
+class TransportVehicleAttendanceSerializer(DocumentSerializer):
     campus_name = serializers.CharField(source="campus.name", read_only=True)
     vehicle_number = serializers.CharField(source="vehicle.vehicle_number", read_only=True)
     driver_name = serializers.CharField(source="driver.full_name", read_only=True)
@@ -3006,7 +3021,7 @@ class TransportVehicleAttendanceSerializer(serializers.ModelSerializer):
         return attrs
 
 
-class TransportTripLogSerializer(serializers.ModelSerializer):
+class TransportTripLogSerializer(DocumentSerializer):
     campus_name = serializers.CharField(source="campus.name", read_only=True)
     route_name = serializers.CharField(source="route.name", read_only=True)
     vehicle_number = serializers.CharField(source="vehicle.vehicle_number", read_only=True)
@@ -3031,7 +3046,7 @@ class TransportTripLogSerializer(serializers.ModelSerializer):
         return attrs
 
 
-class DigitalLibraryResourceSerializer(serializers.ModelSerializer):
+class DigitalLibraryResourceSerializer(DocumentSerializer):
     campus_name = serializers.CharField(source="campus.name", read_only=True)
     book_title = serializers.CharField(source="book.title", read_only=True)
 
@@ -3048,7 +3063,7 @@ class DigitalLibraryResourceSerializer(serializers.ModelSerializer):
         return attrs
 
 
-class LibraryBookRequestSerializer(serializers.ModelSerializer):
+class LibraryBookRequestSerializer(DocumentSerializer):
     campus_name = serializers.CharField(source="campus.name", read_only=True)
     book_title = serializers.CharField(source="book.title", read_only=True)
     requester_name = serializers.SerializerMethodField()
@@ -3081,7 +3096,7 @@ class LibraryBookRequestSerializer(serializers.ModelSerializer):
         return attrs
 
 
-class InventoryAssetSerializer(serializers.ModelSerializer):
+class InventoryAssetSerializer(DocumentSerializer):
     campus_name = serializers.CharField(source="campus.name", read_only=True)
     allocated_to_user_name = serializers.SerializerMethodField()
     allocated_to_student_name = serializers.CharField(source="allocated_to_student.full_name", read_only=True)
@@ -3107,7 +3122,7 @@ class InventoryAssetSerializer(serializers.ModelSerializer):
         return attrs
 
 
-class AssetMaintenanceLogSerializer(serializers.ModelSerializer):
+class AssetMaintenanceLogSerializer(DocumentSerializer):
     campus_name = serializers.CharField(source="campus.name", read_only=True)
     asset_code = serializers.CharField(source="asset.asset_code", read_only=True)
 
@@ -3124,7 +3139,7 @@ class AssetMaintenanceLogSerializer(serializers.ModelSerializer):
         return attrs
 
 
-class SchoolWebsiteContentSerializer(serializers.ModelSerializer):
+class SchoolWebsiteContentSerializer(DocumentSerializer):
     campus_name = serializers.CharField(source="campus.name", read_only=True)
 
     class Meta:
@@ -3133,7 +3148,7 @@ class SchoolWebsiteContentSerializer(serializers.ModelSerializer):
         read_only_fields = ("created_by", "created_at", "updated_at")
 
 
-class PushNotificationDeviceSerializer(serializers.ModelSerializer):
+class PushNotificationDeviceSerializer(DocumentSerializer):
     campus_name = serializers.CharField(source="campus.name", read_only=True)
     user_name = serializers.SerializerMethodField()
 
@@ -3147,7 +3162,7 @@ class PushNotificationDeviceSerializer(serializers.ModelSerializer):
         return obj.user.get_full_name() or obj.user.username
 
 
-class PushNotificationLogSerializer(serializers.ModelSerializer):
+class PushNotificationLogSerializer(DocumentSerializer):
     campus_name = serializers.CharField(source="campus.name", read_only=True)
     user_name = serializers.SerializerMethodField()
     student_name = serializers.CharField(source="student.full_name", read_only=True)
@@ -3163,14 +3178,14 @@ class PushNotificationLogSerializer(serializers.ModelSerializer):
         return obj.user.get_full_name() or obj.user.username
 
 
-class MarketplacePluginSerializer(serializers.ModelSerializer):
+class MarketplacePluginSerializer(DocumentSerializer):
     class Meta:
         model = MarketplacePlugin
         fields = ("id", "code", "name", "plugin_type", "provider_name", "description", "config_schema", "is_enabled", "created_by", "created_at", "updated_at")
         read_only_fields = ("created_by", "created_at", "updated_at")
 
 
-class SchoolPluginConfigSerializer(serializers.ModelSerializer):
+class SchoolPluginConfigSerializer(DocumentSerializer):
     campus_name = serializers.CharField(source="campus.name", read_only=True)
     plugin_name = serializers.CharField(source="plugin.name", read_only=True)
     plugin_type = serializers.CharField(source="plugin.plugin_type", read_only=True)
@@ -3181,7 +3196,7 @@ class SchoolPluginConfigSerializer(serializers.ModelSerializer):
         read_only_fields = ("created_by", "created_at", "updated_at")
 
 
-class AccountingLedgerEntrySerializer(serializers.ModelSerializer):
+class AccountingLedgerEntrySerializer(DocumentSerializer):
     campus_name = serializers.CharField(source="campus.name", read_only=True)
 
     class Meta:
@@ -3190,7 +3205,7 @@ class AccountingLedgerEntrySerializer(serializers.ModelSerializer):
         read_only_fields = ("created_by", "created_at", "updated_at")
 
 
-class ReportDefinitionSerializer(serializers.ModelSerializer):
+class ReportDefinitionSerializer(DocumentSerializer):
     campus_name = serializers.CharField(source="campus.name", read_only=True)
 
     class Meta:
@@ -3199,7 +3214,7 @@ class ReportDefinitionSerializer(serializers.ModelSerializer):
         read_only_fields = ("created_by", "created_at", "updated_at")
 
 
-class SecurityPolicySerializer(serializers.ModelSerializer):
+class SecurityPolicySerializer(DocumentSerializer):
     campus_name = serializers.CharField(source="campus.name", read_only=True)
 
     class Meta:
@@ -3208,7 +3223,7 @@ class SecurityPolicySerializer(serializers.ModelSerializer):
         read_only_fields = ("created_by", "created_at", "updated_at")
 
 
-class DeviceLoginSessionSerializer(serializers.ModelSerializer):
+class DeviceLoginSessionSerializer(DocumentSerializer):
     campus_name = serializers.CharField(source="campus.name", read_only=True)
     user_name = serializers.SerializerMethodField()
 
@@ -3221,7 +3236,7 @@ class DeviceLoginSessionSerializer(serializers.ModelSerializer):
         return obj.user.get_full_name() or obj.user.username
 
 
-class SecurityEventSerializer(serializers.ModelSerializer):
+class SecurityEventSerializer(DocumentSerializer):
     campus_name = serializers.CharField(source="campus.name", read_only=True)
     user_name = serializers.SerializerMethodField()
 
@@ -3236,10 +3251,11 @@ class SecurityEventSerializer(serializers.ModelSerializer):
         return obj.user.get_full_name() or obj.user.username
 
 
-class ProductionAuditRunSerializer(serializers.ModelSerializer):
+class ProductionAuditRunSerializer(DocumentSerializer):
     campus_name = serializers.CharField(source="campus.name", read_only=True)
 
     class Meta:
         model = ProductionAuditRun
         fields = ("id", "campus", "campus_name", "status", "checks", "summary", "report_url", "started_at", "completed_at", "created_by", "created_at", "updated_at")
         read_only_fields = ("status", "checks", "summary", "report_url", "started_at", "completed_at", "created_by", "created_at", "updated_at")
+

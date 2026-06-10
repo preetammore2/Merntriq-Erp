@@ -73,7 +73,7 @@ After the Super Admin signs in, create School Admin, Account, Teacher, and Stude
 Set `CAMPUS_DATABASE_URLS` in `.env` when campuses must use separate databases:
 
 ```dotenv
-CAMPUS_DATABASE_URLS=M360-MAIN=postgres://user:pass@host:5432/mentriq360_main;M360-NORTH=postgres://user:pass@host:5432/mentriq360_north
+CAMPUS_DATABASE_URLS=M360-MAIN=postgres://<user>:<pass>@<host>:5432/mentriq360_main;M360-NORTH=postgres://<user>:<pass>@<host>:5432/mentriq360_north
 ```
 
 Then run:

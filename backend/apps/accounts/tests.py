@@ -1,10 +1,15 @@
+import time
+from datetime import timedelta
+from unittest.mock import patch
+
 from django.test import override_settings
+from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APITestCase
 
 from apps.accounts.captcha import make_captcha_token
 from apps.accounts.models import User, UserRole
-from apps.accounts.serializers import _FAIL_PREFIX, _MAX_FAILURES, _LOCKOUT_SECONDS
+from apps.accounts.serializers import _FAIL_PREFIX, _FAIL_IP_PREFIX, _MAX_FAILURES, _LOCKOUT_SECONDS
 from apps.core.models import Campus, CampusMembership
 
 
@@ -20,6 +25,9 @@ from apps.core.models import Campus, CampusMembership
 )
 class LoginCaptchaTests(APITestCase):
     def setUp(self):
+        from rest_framework.settings import api_settings
+        if hasattr(api_settings, '_user_settings'):
+            del api_settings._user_settings
         from django.core.cache import cache
         cache.clear()
         self.school = Campus.objects.create(name="Login Test School", code="LOGIN")
@@ -371,3 +379,381 @@ class PasswordPolicyTests(APITestCase):
             format="json",
         )
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+
+# ── Security: Password Reset ────────────────────────────────────────────────
+
+@override_settings(
+    SECRET_KEY="test-secret-key-that-is-at-least-32-bytes-long",
+    MENTRIQ_PASSWORD_RESET_TOKEN_MINUTES=30,
+    REST_FRAMEWORK={
+        "DEFAULT_AUTHENTICATION_CLASSES": [
+            "rest_framework_simplejwt.authentication.JWTAuthentication",
+        ],
+        "DEFAULT_THROTTLE_CLASSES": [],
+        "DEFAULT_THROTTLE_RATES": {},
+    },
+)
+class PasswordResetTests(APITestCase):
+    def setUp(self):
+        throttling_patcher = patch(
+            "apps.accounts.views.PasswordResetRequestView.get_throttles",
+            return_value=[],
+        )
+        throttling_patcher.start()
+        self.addCleanup(throttling_patcher.stop)
+        throttling_confirm_patcher = patch(
+            "apps.accounts.views.PasswordResetConfirmView.get_throttles",
+            return_value=[],
+        )
+        throttling_confirm_patcher.start()
+        self.addCleanup(throttling_confirm_patcher.stop)
+        self.user = User.objects.create_user(
+            username="reset.user",
+            password="Passw0rd!Admin1",
+            email="reset@example.com",
+            role=UserRole.SCHOOL_ADMIN,
+        )
+
+    def test_password_reset_request_with_valid_email(self):
+        response = self.client.post(
+            "/api/v1/auth/password-reset/request/",
+            {"email": "reset@example.com"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn("token", response.data)
+        self.assertIn("expires_in_minutes", response.data)
+
+    def test_password_reset_request_with_unknown_email(self):
+        response = self.client.post(
+            "/api/v1/auth/password-reset/request/",
+            {"email": "unknown@example.com"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_password_reset_confirm_with_valid_token(self):
+        request_resp = self.client.post(
+            "/api/v1/auth/password-reset/request/",
+            {"email": "reset@example.com"},
+            format="json",
+        )
+        token = request_resp.data["token"]
+
+        response = self.client.post(
+            "/api/v1/auth/password-reset/confirm/",
+            {"token": token, "new_password": "NewStr0ng!Pass1"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+        # Verify the new password works
+        self.user.refresh_from_db()
+        self.assertTrue(self.user.check_password("NewStr0ng!Pass1"))
+
+    def test_password_reset_confirm_rejects_malformed_token(self):
+        response = self.client.post(
+            "/api/v1/auth/password-reset/confirm/",
+            {"token": "not-a-valid-token", "new_password": "NewStr0ng!Pass1"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_password_reset_confirm_rejects_weak_password(self):
+        request_resp = self.client.post(
+            "/api/v1/auth/password-reset/request/",
+            {"email": "reset@example.com"},
+            format="json",
+        )
+        token = request_resp.data["token"]
+
+        response = self.client.post(
+            "/api/v1/auth/password-reset/confirm/",
+            {"token": token, "new_password": "short1!"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_password_reset_updates_password_changed_at(self):
+        request_resp = self.client.post(
+            "/api/v1/auth/password-reset/request/",
+            {"email": "reset@example.com"},
+            format="json",
+        )
+        token = request_resp.data["token"]
+        self.client.post(
+            "/api/v1/auth/password-reset/confirm/",
+            {"token": token, "new_password": "NewStr0ng!Pass2"},
+            format="json",
+        )
+        self.user.refresh_from_db()
+        self.assertIsNotNone(self.user.password_changed_at)
+
+
+# ── Security: IP-based Brute-force Lockout ────────────────────────────────────
+
+@override_settings(
+    SECRET_KEY="test-secret-key-that-is-at-least-32-bytes-long",
+    REST_FRAMEWORK={
+        "DEFAULT_AUTHENTICATION_CLASSES": [
+            "rest_framework_simplejwt.authentication.JWTAuthentication",
+        ],
+        "DEFAULT_THROTTLE_CLASSES": [],
+        "DEFAULT_THROTTLE_RATES": {},
+    },
+)
+class IPBruteForceLockoutTests(APITestCase):
+    def setUp(self):
+        from rest_framework.settings import api_settings
+        if hasattr(api_settings, '_user_settings'):
+            del api_settings._user_settings
+        from django.core.cache import cache
+        cache.clear()
+        self.school = Campus.objects.create(name="IP Lock School", code="IPLOCK")
+        self.user = User.objects.create_user(
+            username="ip.lock.user",
+            password="Passw0rd!Admin1",
+            role=UserRole.SCHOOL_ADMIN,
+            school=self.school,
+            is_staff=True,
+        )
+        CampusMembership.objects.create(
+            campus=self.school,
+            user=self.user,
+            role="it_admin",
+            is_primary=True,
+            can_manage_users=True,
+            can_configure_attendance=True,
+        )
+
+    def test_ip_is_tracked_on_failed_login(self):
+        from django.core.cache import cache
+        cache.clear()
+        for _ in range(3):
+            self.client.post(
+                "/api/v1/auth/token/",
+                {
+                    "username": "ip.lock.user",
+                    "password": "WrongPassword!1",
+                    "captcha_id": make_captcha_token("25"),
+                    "captcha_answer": "25",
+                },
+                format="json",
+                REMOTE_ADDR="10.0.0.99",
+            )
+        ip_key = f"{_FAIL_IP_PREFIX}10.0.0.99"
+        self.assertGreaterEqual(int(cache.get(ip_key) or 0), 3)
+
+    def test_ip_lockout_after_excessive_failures(self):
+        from django.core.cache import cache
+        cache.clear()
+        # Exceed IP threshold (2 * _MAX_FAILURES)
+        for _ in range(_MAX_FAILURES * 2 + 1):
+            self.client.post(
+                "/api/v1/auth/token/",
+                {
+                    "username": "ip.lock.user",
+                    "password": "WrongPassword!1",
+                    "captcha_id": make_captcha_token("25"),
+                    "captcha_answer": "25",
+                },
+                format="json",
+                REMOTE_ADDR="10.0.0.100",
+            )
+
+        response = self.client.post(
+            "/api/v1/auth/token/",
+            {
+                "username": "ip.lock.user",
+                "password": "Passw0rd!Admin1",
+                "captcha_id": make_captcha_token("25"),
+                "captcha_answer": "25",
+            },
+            format="json",
+            REMOTE_ADDR="10.0.0.100",
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("locked", str(response.data).lower())
+        cache.clear()
+
+
+# ── Security: Email Verification ──────────────────────────────────────────────
+
+@override_settings(
+    SECRET_KEY="test-secret-key-that-is-at-least-32-bytes-long",
+    MENTRIQ_VERIFICATION_TOKEN_HOURS=48,
+    REST_FRAMEWORK={
+        "DEFAULT_AUTHENTICATION_CLASSES": [
+            "rest_framework_simplejwt.authentication.JWTAuthentication",
+        ],
+        "DEFAULT_THROTTLE_CLASSES": [],
+        "DEFAULT_THROTTLE_RATES": {},
+    },
+)
+class EmailVerificationTests(APITestCase):
+    def setUp(self):
+        from rest_framework_simplejwt.tokens import RefreshToken
+        throttling_patcher = patch(
+            "apps.accounts.views.EmailVerificationSendView.get_throttles",
+            return_value=[],
+        )
+        throttling_patcher.start()
+        self.addCleanup(throttling_patcher.stop)
+        self.user = User.objects.create_user(
+            username="verify.user",
+            password="Passw0rd!Admin1",
+            email="verify@example.com",
+            role=UserRole.SCHOOL_ADMIN,
+        )
+        self.refresh = RefreshToken.for_user(self.user)
+        self.access = str(self.refresh.access_token)
+
+    def test_send_verification_returns_token(self):
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {self.access}")
+        response = self.client.post("/api/v1/auth/email-verification/send/")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn("token", response.data)
+        self.assertIn("expires_in_hours", response.data)
+
+    def test_verify_email_with_valid_token(self):
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {self.access}")
+        send_resp = self.client.post("/api/v1/auth/email-verification/send/")
+        token = send_resp.data["token"]
+
+        self.client.credentials()
+        response = self.client.post(
+            "/api/v1/auth/email-verification/confirm/",
+            {"token": token},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.user.refresh_from_db()
+        self.assertTrue(self.user.is_email_verified)
+
+    def test_verify_email_rejects_invalid_token(self):
+        response = self.client.post(
+            "/api/v1/auth/email-verification/confirm/",
+            {"token": "invalid-token"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_already_verified_returns_error(self):
+        self.user.is_email_verified = True
+        self.user.save(update_fields=["is_email_verified"])
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {self.access}")
+        response = self.client.post("/api/v1/auth/email-verification/send/")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+
+# ── Security: Password Change session invalidation ────────────────────────────
+
+@override_settings(
+    SECRET_KEY="test-secret-key-that-is-at-least-32-bytes-long",
+    REST_FRAMEWORK={
+        "DEFAULT_AUTHENTICATION_CLASSES": [
+            "rest_framework_simplejwt.authentication.JWTAuthentication",
+        ],
+        "DEFAULT_THROTTLE_CLASSES": [],
+        "DEFAULT_THROTTLE_RATES": {},
+    },
+)
+class PasswordChangeSecurityTests(APITestCase):
+    def setUp(self):
+        from rest_framework.settings import api_settings
+        if hasattr(api_settings, '_user_settings'):
+            del api_settings._user_settings
+        self.school = Campus.objects.create(name="PW Change School", code="PWCHG")
+        self.user = User.objects.create_user(
+            username="pwchange.user",
+            password="Passw0rd!Admin1",
+            role=UserRole.SCHOOL_ADMIN,
+            school=self.school,
+            is_staff=True,
+        )
+        CampusMembership.objects.create(
+            campus=self.school,
+            user=self.user,
+            role="it_admin",
+            is_primary=True,
+            can_manage_users=True,
+            can_configure_attendance=True,
+        )
+
+    def test_password_change_updates_password_changed_at(self):
+        self.assertIsNone(self.user.password_changed_at)
+        login = self.client.post(
+            "/api/v1/auth/token/",
+            {
+                "username": "pwchange.user",
+                "password": "Passw0rd!Admin1",
+                "captcha_id": make_captcha_token("25"),
+                "captcha_answer": "25",
+            },
+            format="json",
+        )
+        access = login.data["access"]
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {access}")
+
+        response = self.client.post(
+            "/api/v1/auth/change-password/",
+            {"current_password": "Passw0rd!Admin1", "new_password": "N3wStr0ng!Pass"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.user.refresh_from_db()
+        self.assertIsNotNone(self.user.password_changed_at)
+
+    def test_password_change_rejects_wrong_current_password(self):
+        login = self.client.post(
+            "/api/v1/auth/token/",
+            {
+                "username": "pwchange.user",
+                "password": "Passw0rd!Admin1",
+                "captcha_id": make_captcha_token("25"),
+                "captcha_answer": "25",
+            },
+            format="json",
+        )
+        access = login.data["access"]
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {access}")
+
+        response = self.client.post(
+            "/api/v1/auth/change-password/",
+            {"current_password": "WrongPass!1", "new_password": "N3wStr0ng!Pass"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_password_change_rejects_weak_password(self):
+        login = self.client.post(
+            "/api/v1/auth/token/",
+            {
+                "username": "pwchange.user",
+                "password": "Passw0rd!Admin1",
+                "captcha_id": make_captcha_token("25"),
+                "captcha_answer": "25",
+            },
+            format="json",
+        )
+        access = login.data["access"]
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {access}")
+
+        response = self.client.post(
+            "/api/v1/auth/change-password/",
+            {"current_password": "Passw0rd!Admin1", "new_password": "short1!"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+
+# ── Security: Argon2 Password Hasher ─────────────────────────────────────────
+
+class Argon2PasswordHasherTests(APITestCase):
+    def test_argon2_is_default_hasher(self):
+        from django.conf import settings
+        self.assertEqual(
+            settings.PASSWORD_HASHERS[0],
+            "django.contrib.auth.hashers.Argon2PasswordHasher",
+        )

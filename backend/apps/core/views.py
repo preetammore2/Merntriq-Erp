@@ -14,8 +14,7 @@ from django.conf import settings
 from django.core.cache import cache
 from django.db import transaction
 from django.http import HttpResponse, StreamingHttpResponse
-from django.db.models import Avg, Count, F, Q, Sum
-from django.shortcuts import get_object_or_404
+from apps.core.mongo_compat import Avg, Count, F, Q, Sum, get_object_or_404
 from django.utils import timezone
 from django.utils.dateparse import parse_date, parse_datetime
 from drf_spectacular.types import OpenApiTypes
@@ -152,6 +151,7 @@ from .models import (
     WhiteLabelConfig,
 )
 from .attendance_rules import ensure_attendance_date_is_editable
+from .input import sanitize_webhook_payload
 from .permissions import RoleAccessPermission
 from .serializers import (
     AcademicEventSerializer,
@@ -283,7 +283,7 @@ def teacher_id_for_section_subject(section: ClassSection, subject: str) -> int |
         section=section,
         subject__iexact=subject,
         is_active=True,
-    ).select_related("teacher").first()
+    ).first()
     return allocation.teacher_id if allocation else section.class_teacher_id
 
 
@@ -334,10 +334,13 @@ def generate_temporary_password(length: int = 12) -> str:
 
 
 def uploaded_image_to_data_url(upload, *, allowed_types: set[str], max_size: int, max_dimensions: tuple[int, int] = (1600, 1600)) -> str:
+    from apps.core.input import validate_file_signature
+
     if upload.content_type not in allowed_types:
         raise ValidationError({"file": "Unsupported image type."})
     if upload.size > max_size:
         raise ValidationError({"file": f"Image is too large. Max size is {max_size // 1024} KB."})
+    validate_file_signature(upload, allowed_types)
 
     raw = upload.read()
     if upload.content_type == "image/svg+xml":
@@ -370,10 +373,13 @@ def uploaded_image_to_data_url(upload, *, allowed_types: set[str], max_size: int
 
 
 def uploaded_file_to_data_url(upload, *, allowed_types: set[str], max_size: int) -> str:
+    from apps.core.input import validate_file_signature
+
     if upload.content_type not in allowed_types:
         raise ValidationError({"file": "Unsupported file type."})
     if upload.size > max_size:
         raise ValidationError({"file": f"File is too large. Max size is {max_size // 1024} KB."})
+    validate_file_signature(upload, allowed_types)
     encoded = base64.b64encode(upload.read()).decode("ascii")
     return f"data:{upload.content_type};base64,{encoded}"
 
@@ -390,7 +396,8 @@ def protected_data_url_response(data_url: str, filename: str, fallback_content_t
         content = base64.b64decode(encoded)
     except (ValueError, TypeError):
         raise ValidationError({"file": "Stored file is invalid."})
-    safe_name = (filename or "download").replace('"', "").replace("\r", "").replace("\n", "")
+    from apps.core.input import sanitize_filename
+    safe_name = sanitize_filename(filename)
     response = HttpResponse(content, content_type=content_type)
     response["Content-Disposition"] = f'attachment; filename="{safe_name}"'
     return response
@@ -481,25 +488,25 @@ def primary_school_for_user(user) -> Campus | None:
     if getattr(user, "school_id", None):
         return user.school
     if getattr(user, "role", None) == UserRole.STUDENT:
-        student = Student.objects.filter(user=user).select_related("campus").first()
+        student = Student.objects.filter(user_id=user.pk).first()
         if student:
             return student.campus
     if getattr(user, "role", None) in (UserRole.TEACHER, UserRole.ACCOUNT, UserRole.SCHOOL_ADMIN):
-        staff_profile = StaffProfile.objects.filter(user=user).select_related("campus").first()
+        staff_profile = StaffProfile.objects.filter(user_id=user.pk).first()
         if staff_profile:
             return staff_profile.campus
     if getattr(user, "role", None) == UserRole.TEACHER:
         section = (
-            ClassSection.objects.filter(teacher_section_q(user)).select_related("campus").first()
+            ClassSection.objects.filter(teacher_section_q(user)).first()
             or ClassSection.objects.filter(subject_allocations__teacher=user, subject_allocations__is_active=True)
-            .select_related("campus")
+            
             .first()
         )
         if section:
             return section.campus
     membership = (
-        CampusMembership.objects.filter(user=user, is_primary=True).select_related("campus").first()
-        or CampusMembership.objects.filter(user=user).select_related("campus").first()
+        CampusMembership.objects.filter(user_id=user.pk, is_primary=True).first()
+        or CampusMembership.objects.filter(user_id=user.pk).first()
     )
     return membership.campus if membership else None
 
@@ -509,24 +516,24 @@ def campus_ids_for_admin_like_user(user) -> list[int]:
         return list(Campus.objects.values_list("id", flat=True))
     if getattr(user, "school_id", None):
         return [user.school_id]
-    return list(CampusMembership.objects.filter(user=user).values_list("campus_id", flat=True).distinct())
+    return list(CampusMembership.objects.filter(user_id=user.pk).values_list("campus_id", flat=True).distinct())
 
 
 def scoped_finance_events_for_user(user):
-    queryset = FinanceEvent.objects.select_related("campus", "created_by")
+    queryset = FinanceEvent.objects
     if not getattr(user, "is_authenticated", False):
         return queryset.none()
     if user.role in (UserRole.SUPER_ADMIN, UserRole.SCHOOL_ADMIN, UserRole.ACCOUNT):
         campus_ids = campus_ids_for_admin_like_user(user)
         return queryset.filter(campus_id__in=campus_ids) if campus_ids else queryset.none()
     if user.role == UserRole.STUDENT:
-        student = Student.objects.filter(user=user).first()
+        student = Student.objects.filter(user_id=user.pk).first()
         return queryset.filter(payload__studentId=student.id) if student else queryset.none()
     return queryset.none()
 
 
 def scoped_academic_events_for_user(user):
-    queryset = AcademicEvent.objects.select_related("campus", "student", "student__section", "teacher", "created_by")
+    queryset = AcademicEvent.objects
     if not getattr(user, "is_authenticated", False):
         return queryset.none()
     if user.role in (UserRole.SUPER_ADMIN, UserRole.SCHOOL_ADMIN, UserRole.ACCOUNT):
@@ -549,7 +556,7 @@ def scoped_academic_events_for_user(user):
             teacher_filter |= Q(payload__sectionId__in=subject_sections)
         return queryset.filter(campus_id__in=teacher_campuses).filter(teacher_filter).distinct() if teacher_campuses else queryset.none()
     if user.role == UserRole.STUDENT:
-        student = Student.objects.filter(user=user).select_related("campus", "section").first()
+        student = Student.objects.filter(user_id=user.pk).first()
         if not student:
             return queryset.none()
         return queryset.filter(
@@ -643,7 +650,7 @@ DEFAULT_SAAS_PLANS = {
 def active_subscription_for_campus(campus: Campus) -> SchoolSubscription | None:
     return (
         SchoolSubscription.objects.filter(campus=campus)
-        .select_related("plan", "campus")
+        
         .order_by("-end_date", "-created_at")
         .first()
     )
@@ -753,7 +760,7 @@ def log_user_activity(request, activity_type: str, summary: str, *, campus: Camp
 def refresh_expired_subscriptions() -> int:
     today = timezone.localdate()
     updated = 0
-    for subscription in SchoolSubscription.objects.select_related("campus", "plan").filter(
+    for subscription in SchoolSubscription.objects.filter(
         status__in=[SubscriptionStatus.TRIAL, SubscriptionStatus.ACTIVE, SubscriptionStatus.GRACE],
         end_date__lt=today,
     ):
@@ -863,7 +870,7 @@ def student_from_payload_or_event(event) -> Student | None:
         return student
     student_id = (event.payload or {}).get("studentId")
     if student_id:
-        return Student.objects.filter(pk=student_id).select_related("section", "user").first()
+        return Student.objects.filter(id=student_id).first()
     return None
 
 
@@ -879,7 +886,7 @@ def realtime_rooms_for_academic_event(event: AcademicEvent) -> list[str]:
         rooms.extend([user_room(student.user_id), class_room(student.section)])
     section_id = payload.get("sectionId")
     if section_id:
-        rooms.append(class_room(ClassSection.objects.filter(pk=section_id).select_related("campus").first()))
+        rooms.append(class_room(ClassSection.objects.filter(id=section_id).first()))
     if event.teacher_id:
         rooms.append(user_room(event.teacher_id))
     if event.event_type in {AcademicEventType.NOTES_UPLOADED, AcademicEventType.ASSIGNMENT_UPLOADED, AcademicEventType.ASSIGNMENT_PUBLISHED, AcademicEventType.ASSIGNMENT_SUBMITTED}:
@@ -907,7 +914,7 @@ def realtime_rooms_for_finance_event(event: FinanceEvent) -> list[str]:
     ]
     student_id = payload.get("studentId")
     if student_id:
-        student = Student.objects.filter(pk=student_id).select_related("user", "section").first()
+        student = Student.objects.filter(id=student_id).first()
         if student:
             rooms.extend([user_room(student.user_id), class_room(student.section)])
     rooms.append(user_room(payload.get("staffUserId")))
@@ -1125,7 +1132,7 @@ class RoleScopedModelViewSet(viewsets.ModelViewSet):
         if getattr(user, "school_id", None):
             return [user.school_id]
         return list(
-            CampusMembership.objects.filter(user=user)
+            CampusMembership.objects.filter(user_id=user.pk)
             .values_list("campus_id", flat=True)
             .distinct()
         )
@@ -1185,6 +1192,27 @@ class RoleScopedModelViewSet(viewsets.ModelViewSet):
         if room:
             return room.campus_id
         return None
+
+    def campus_id_from_instance(self, instance) -> int | None:
+        campus = getattr(instance, "campus", None)
+        if campus is not None:
+            return campus.id if hasattr(campus, "id") else campus
+        student = getattr(instance, "student", None)
+        if student is not None:
+            return getattr(student, "campus_id", None)
+        section = getattr(instance, "section", None)
+        if section is not None:
+            return getattr(section, "campus_id", None)
+        staff_user = getattr(instance, "staff_user", None)
+        if staff_user is not None:
+            return getattr(staff_user, "school_id", None)
+        device = getattr(instance, "device", None)
+        if device is not None:
+            return getattr(device, "campus_id", None)
+        subject = getattr(instance, "subject", None)
+        if subject is not None:
+            return getattr(subject, "campus_id", None)
+        return getattr(instance, "campus_id", None)
 
     def ensure_admin_payload_scope(self, attrs) -> None:
         user = self.request.user
@@ -1248,6 +1276,11 @@ class RoleScopedModelViewSet(viewsets.ModelViewSet):
         self.write_audit(AuditAction.UPDATE, instance)
 
     def perform_destroy(self, instance):
+        user = self.request.user
+        if getattr(user, "role", None) in (UserRole.SCHOOL_ADMIN, UserRole.ACCOUNT):
+            campus_id = self.campus_id_from_instance(instance)
+            if campus_id is not None and campus_id not in self.admin_campus_ids():
+                raise PermissionDenied("This record belongs to a campus outside your admin scope.")
         self.write_audit(AuditAction.DELETE, instance)
         instance.delete()
 
@@ -1274,7 +1307,7 @@ class CampusViewSet(RoleScopedModelViewSet):
         self.write_audit(AuditAction.CREATE, instance)
 
     @action(detail=True, methods=["post"], url_path="activate")
-    def activate(self, request, pk=None):
+    def activate(self, request, id=None):
         campus = self.get_object()
         campus.status = "active"
         campus.save(update_fields=["status", "updated_at"])
@@ -1283,7 +1316,7 @@ class CampusViewSet(RoleScopedModelViewSet):
         return Response(self.get_serializer(campus).data, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=["post"], url_path="suspend")
-    def suspend(self, request, pk=None):
+    def suspend(self, request, id=None):
         campus = self.get_object()
         campus.status = "suspended"
         campus.save(update_fields=["status", "updated_at"])
@@ -1309,11 +1342,11 @@ class SchoolViewSet(RoleScopedModelViewSet):
     def filter_queryset_by_role(self, queryset):
         user = self.request.user
         school = primary_school_for_user(user)
-        return queryset.filter(pk=school.pk) if school else queryset.none()
+        return queryset.filter(id=school.pk) if school else queryset.none()
 
     def get_queryset(self):
         queryset = super().get_queryset()
-        return queryset.prefetch_related("students", "users", "memberships__user")
+        return queryset
 
     def _school_payload(self, request):
         payload = request.data.copy()
@@ -1404,7 +1437,7 @@ class SchoolViewSet(RoleScopedModelViewSet):
         return Response(SchoolProfileSerializer(campus, context={"request": request}).data)
 
     @action(detail=True, methods=["post"], url_path="activate")
-    def activate(self, request, pk=None):
+    def activate(self, request, id=None):
         campus = self.get_object()
         campus.status = "active"
         campus.save(update_fields=["status", "updated_at"])
@@ -1413,7 +1446,7 @@ class SchoolViewSet(RoleScopedModelViewSet):
         return Response(self.get_serializer(campus).data, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=["post"], url_path="deactivate")
-    def deactivate(self, request, pk=None):
+    def deactivate(self, request, id=None):
         campus = self.get_object()
         campus.status = "inactive"
         campus.save(update_fields=["status", "updated_at"])
@@ -1422,7 +1455,7 @@ class SchoolViewSet(RoleScopedModelViewSet):
         return Response(self.get_serializer(campus).data, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=["post"], url_path="suspend")
-    def suspend(self, request, pk=None):
+    def suspend(self, request, id=None):
         campus = self.get_object()
         campus.status = "suspended"
         campus.save(update_fields=["status", "updated_at"])
@@ -1431,12 +1464,12 @@ class SchoolViewSet(RoleScopedModelViewSet):
         return Response(self.get_serializer(campus).data, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=["get"], url_path="connection-status")
-    def connection_status(self, request, pk=None):
+    def connection_status(self, request, id=None):
         campus = self.get_object()
         return Response(school_connection_status(campus), status=status.HTTP_200_OK)
 
     @action(detail=True, methods=["post"], url_path="create-admin")
-    def create_admin(self, request, pk=None):
+    def create_admin(self, request, id=None):
         campus = self.get_object()
         admin_user, temporary_password = self._create_school_admin(campus, request.data)
         return Response(
@@ -1452,7 +1485,7 @@ class SchoolViewSet(RoleScopedModelViewSet):
         )
 
     @action(detail=True, methods=["post"], url_path="upload-logo", parser_classes=[MultiPartParser, FormParser])
-    def upload_logo(self, request, pk=None):
+    def upload_logo(self, request, id=None):
         campus = self.get_object()
         upload = request.FILES.get("file")
         if not upload:
@@ -1469,7 +1502,7 @@ class SchoolViewSet(RoleScopedModelViewSet):
         return Response(self.get_serializer(campus).data, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=["post"], url_path="upload-banner", parser_classes=[MultiPartParser, FormParser])
-    def upload_banner(self, request, pk=None):
+    def upload_banner(self, request, id=None):
         campus = self.get_object()
         upload = request.FILES.get("file")
         if not upload:
@@ -1486,7 +1519,7 @@ class SchoolViewSet(RoleScopedModelViewSet):
 
 
 class CampusMembershipViewSet(RoleScopedModelViewSet):
-    queryset = CampusMembership.objects.select_related("campus", "user")
+    queryset = CampusMembership.objects
     serializer_class = CampusMembershipSerializer
     campus_filter_path = "campus_id"
     read_roles = ADMIN_ROLES
@@ -1501,7 +1534,7 @@ class CampusMembershipViewSet(RoleScopedModelViewSet):
 
 
 class AttendanceDeviceViewSet(RoleScopedModelViewSet):
-    queryset = AttendanceDevice.objects.select_related("campus", "configured_by")
+    queryset = AttendanceDevice.objects
     serializer_class = AttendanceDeviceSerializer
     campus_filter_path = "campus_id"
     read_roles = ADMIN_ROLES + (UserRole.TEACHER,)
@@ -1529,12 +1562,19 @@ class AttendanceDeviceViewSet(RoleScopedModelViewSet):
         self.write_audit(AuditAction.CREATE, instance)
 
     def perform_update(self, serializer):
+        instance = self.get_object()
+        user = self.request.user
         self.ensure_admin_payload_scope(serializer.validated_data)
-        instance = serializer.save(configured_by=self.request.user)
+        if getattr(user, "role", None) not in ADMIN_ROLES:
+            payload_campus_id = self.campus_id_from_attrs(serializer.validated_data)
+            instance_campus_id = self.campus_id_from_instance(instance)
+            if payload_campus_id is not None and instance_campus_id is not None and payload_campus_id != instance_campus_id:
+                raise PermissionDenied("Cannot change the campus association of this record.")
+        instance = serializer.save()
         self.write_audit(AuditAction.UPDATE, instance)
 
     @action(detail=True, methods=["post"], url_path="capture")
-    def capture(self, request, pk=None):
+    def capture(self, request, id=None):
         device = self.get_object()
         if getattr(request.user, "role", None) not in ADMIN_ROLES:
             raise PermissionDenied("Only campus admins can ingest hardware attendance.")
@@ -1623,7 +1663,7 @@ class AttendanceDeviceViewSet(RoleScopedModelViewSet):
         raise ValidationError({"person_type": "Use student or staff."})
 
     @action(detail=True, methods=["get"], url_path="status-check")
-    def status_check(self, request, pk=None):
+    def status_check(self, request, id=None):
         device = self.get_object()
         heartbeat_window = max(device.heartbeat_seconds * 3, 30)
         online = bool(device.last_seen_at and device.last_seen_at >= timezone.now() - timedelta(seconds=heartbeat_window))
@@ -1639,10 +1679,10 @@ class AttendanceDeviceViewSet(RoleScopedModelViewSet):
         )
 
     @action(detail=True, methods=["get", "post"], url_path="sync-logs")
-    def sync_logs(self, request, pk=None):
+    def sync_logs(self, request, id=None):
         device = self.get_object()
         if request.method == "GET":
-            queryset = device.sync_logs.select_related("campus", "device", "created_by")
+            queryset = device.sync_logs
             return Response(DeviceSyncLogSerializer(queryset, many=True, context={"request": request}).data, status=status.HTTP_200_OK)
         if getattr(request.user, "role", None) not in ADMIN_ROLES:
             raise PermissionDenied("Only campus admins can sync hardware logs.")
@@ -1662,13 +1702,13 @@ class AttendanceDeviceViewSet(RoleScopedModelViewSet):
         return Response(DeviceSyncLogSerializer(log, context={"request": request}).data, status=status.HTTP_201_CREATED)
 
     @action(detail=True, methods=["get"], url_path="error-logs")
-    def error_logs(self, request, pk=None):
+    def error_logs(self, request, id=None):
         device = self.get_object()
-        queryset = device.sync_logs.filter(status=DeviceSyncStatus.FAILED).select_related("campus", "device", "created_by")
+        queryset = device.sync_logs.filter(status=DeviceSyncStatus.FAILED)
         return Response(DeviceSyncLogSerializer(queryset, many=True, context={"request": request}).data, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=["post"], url_path="retry-failed-sync")
-    def retry_failed_sync(self, request, pk=None):
+    def retry_failed_sync(self, request, id=None):
         device = self.get_object()
         failed_log = device.sync_logs.filter(status=DeviceSyncStatus.FAILED).first()
         if not failed_log:
@@ -1687,7 +1727,7 @@ class AttendanceDeviceViewSet(RoleScopedModelViewSet):
 
 
 class AcademicSessionViewSet(RoleScopedModelViewSet):
-    queryset = AcademicSession.objects.select_related("campus")
+    queryset = AcademicSession.objects
     serializer_class = AcademicSessionSerializer
     campus_filter_path = "campus_id"
     filterset_fields = ("campus", "is_active")
@@ -1705,7 +1745,7 @@ class AcademicSessionViewSet(RoleScopedModelViewSet):
 
 
 class ClassSectionViewSet(RoleScopedModelViewSet):
-    queryset = ClassSection.objects.select_related("campus", "session", "class_teacher")
+    queryset = ClassSection.objects
     serializer_class = ClassSectionSerializer
     campus_filter_path = "campus_id"
     filterset_fields = ("campus", "session", "class_teacher")
@@ -1720,7 +1760,7 @@ class ClassSectionViewSet(RoleScopedModelViewSet):
 
 
 class TeacherSubjectAllocationViewSet(RoleScopedModelViewSet):
-    queryset = TeacherSubjectAllocation.objects.select_related("campus", "section", "teacher")
+    queryset = TeacherSubjectAllocation.objects
     serializer_class = TeacherSubjectAllocationSerializer
     campus_filter_path = "campus_id"
     read_roles = ADMIN_ROLES + (UserRole.TEACHER,)
@@ -1745,7 +1785,7 @@ class TeacherSubjectAllocationViewSet(RoleScopedModelViewSet):
 
 
 class SubjectViewSet(RoleScopedModelViewSet):
-    queryset = Subject.objects.select_related("campus")
+    queryset = Subject.objects
     serializer_class = SubjectSerializer
     campus_filter_path = "campus_id"
     read_roles = READ_ROLES
@@ -1768,7 +1808,7 @@ class SubjectViewSet(RoleScopedModelViewSet):
 
 
 class StudentViewSet(RoleScopedModelViewSet):
-    queryset = Student.objects.select_related("campus", "section")
+    queryset = Student.objects
     serializer_class = StudentSerializer
     campus_filter_path = "campus_id"
     search_fields = ("admission_number", "first_name", "last_name")
@@ -1785,7 +1825,7 @@ class StudentViewSet(RoleScopedModelViewSet):
                 | Q(section__subject_allocations__teacher=user, section__subject_allocations__is_active=True)
             ).distinct()
         if user.role == UserRole.STUDENT:
-            return queryset.filter(user=user)
+            return queryset.filter(user_id=user.pk)
         return queryset.none()
 
     def perform_create(self, serializer):
@@ -1799,7 +1839,7 @@ class StudentViewSet(RoleScopedModelViewSet):
         self.write_audit(AuditAction.CREATE, instance)
 
     @action(detail=True, methods=["post"], url_path="upload-photo", parser_classes=[MultiPartParser, FormParser])
-    def upload_photo(self, request, pk=None):
+    def upload_photo(self, request, id=None):
         student = self.get_object()
         upload = request.FILES.get("file")
         if not upload:
@@ -1815,7 +1855,7 @@ class StudentViewSet(RoleScopedModelViewSet):
         return Response(self.get_serializer(student).data, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=["post"], url_path="upload-document", parser_classes=[MultiPartParser, FormParser])
-    def upload_document(self, request, pk=None):
+    def upload_document(self, request, id=None):
         student = self.get_object()
         upload = request.FILES.get("file")
         if not upload:
@@ -1837,7 +1877,7 @@ class StudentViewSet(RoleScopedModelViewSet):
         return Response(DocumentSerializer(document, context={"request": request}).data, status=status.HTTP_201_CREATED)
 
     @action(detail=True, methods=["get"], url_path="profile-pdf")
-    def profile_pdf(self, request, pk=None):
+    def profile_pdf(self, request, id=None):
         student = self.get_object()
         lines = [
             f"Student ID: {student.admission_number}",
@@ -1866,7 +1906,7 @@ class StudentViewSet(RoleScopedModelViewSet):
 
 
 class AttendanceRecordViewSet(RoleScopedModelViewSet):
-    queryset = AttendanceRecord.objects.select_related("student", "section", "marked_by")
+    queryset = AttendanceRecord.objects
     serializer_class = AttendanceRecordSerializer
     campus_filter_path = "student__campus_id"
     read_roles = READ_ROLES
@@ -1900,7 +1940,7 @@ class AttendanceRecordViewSet(RoleScopedModelViewSet):
         if getattr(user, "role", None) not in self.write_roles:
             raise PermissionDenied("You do not have access to mark attendance.")
 
-        section = get_object_or_404(ClassSection, pk=request.data.get("section"))
+        section = get_object_or_404(ClassSection, id=request.data.get("section"))
         if user.role == UserRole.SCHOOL_ADMIN and section.campus_id not in self.admin_campus_ids():
             raise PermissionDenied("This section belongs to a campus outside your admin scope.")
 
@@ -1918,7 +1958,7 @@ class AttendanceRecordViewSet(RoleScopedModelViewSet):
         allowed_statuses = {choice.value for choice in AttendanceStatus}
         device = None
         if request.data.get("device"):
-            device = get_object_or_404(AttendanceDevice, pk=request.data.get("device"), campus=section.campus)
+            device = get_object_or_404(AttendanceDevice, id=request.data.get("device"), campus=section.campus)
         capture_method = request.data.get("capture_method") or (device.device_type if device else AttendanceCaptureMethod.MANUAL)
         if capture_method not in {choice.value for choice in AttendanceCaptureMethod}:
             raise ValidationError({"capture_method": f"Unsupported attendance capture method: {capture_method}"})
@@ -1932,7 +1972,7 @@ class AttendanceRecordViewSet(RoleScopedModelViewSet):
                     student_id = int(item.get("student"))
                 except (TypeError, ValueError):
                     raise ValidationError({"student": "Provide a valid student id."})
-                student = get_object_or_404(Student, pk=student_id, section=section)
+                student = get_object_or_404(Student, id=student_id, section=section)
                 record_status = item.get("status")
                 if record_status not in allowed_statuses:
                     raise ValidationError({"status": f"Unsupported attendance status: {record_status}"})
@@ -2001,7 +2041,7 @@ class AttendanceRecordViewSet(RoleScopedModelViewSet):
                 record.status,
                 record.marked_by.get_full_name() or record.marked_by.username if record.marked_by else "",
             ]
-            for record in queryset.select_related("student", "section", "marked_by").order_by("-date", "section__grade_name", "student__first_name")
+            for record in queryset.order_by("-date", "section__grade_name", "student__first_name")
         ]
         AuditEvent.objects.create(
             actor=request.user,
@@ -2016,7 +2056,7 @@ class AttendanceRecordViewSet(RoleScopedModelViewSet):
 
 
 class StaffAttendanceRecordViewSet(RoleScopedModelViewSet):
-    queryset = StaffAttendanceRecord.objects.select_related("campus", "staff_user", "device", "marked_by")
+    queryset = StaffAttendanceRecord.objects
     serializer_class = StaffAttendanceRecordSerializer
     campus_filter_path = "campus_id"
     read_roles = ACCOUNT_ROLES + (UserRole.TEACHER,)
@@ -2063,7 +2103,7 @@ class StaffAttendanceRecordViewSet(RoleScopedModelViewSet):
                 record.status,
                 record.notes,
             ]
-            for record in queryset.select_related("staff_user").order_by("-date", "staff_user__username")
+            for record in queryset.order_by("-date", "staff_user__username")
         ]
         AuditEvent.objects.create(
             actor=request.user,
@@ -2078,7 +2118,7 @@ class StaffAttendanceRecordViewSet(RoleScopedModelViewSet):
 
 
 class StaffProfileViewSet(RoleScopedModelViewSet):
-    queryset = StaffProfile.objects.select_related("campus", "user")
+    queryset = StaffProfile.objects
     serializer_class = StaffProfileSerializer
     campus_filter_path = "campus_id"
     read_roles = ACCOUNT_ROLES + (UserRole.TEACHER,)
@@ -2092,7 +2132,7 @@ class StaffProfileViewSet(RoleScopedModelViewSet):
             campus_ids = self.admin_campus_ids()
             return queryset.filter(campus_id__in=campus_ids) if campus_ids else queryset.none()
         if user.role == UserRole.TEACHER:
-            return queryset.filter(user=user)
+            return queryset.filter(user_id=user.pk)
         return queryset.none()
 
     def perform_create(self, serializer):
@@ -2108,7 +2148,7 @@ class StaffProfileViewSet(RoleScopedModelViewSet):
         self.write_audit(AuditAction.CREATE, instance)
 
     @action(detail=True, methods=["post"], url_path="upload-photo", parser_classes=[MultiPartParser, FormParser])
-    def upload_photo(self, request, pk=None):
+    def upload_photo(self, request, id=None):
         staff_profile = self.get_object()
         upload = request.FILES.get("file")
         if not upload:
@@ -2124,7 +2164,7 @@ class StaffProfileViewSet(RoleScopedModelViewSet):
         return Response(self.get_serializer(staff_profile).data, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=["post"], url_path="upload-document", parser_classes=[MultiPartParser, FormParser])
-    def upload_document(self, request, pk=None):
+    def upload_document(self, request, id=None):
         staff_profile = self.get_object()
         upload = request.FILES.get("file")
         if not upload:
@@ -2146,7 +2186,7 @@ class StaffProfileViewSet(RoleScopedModelViewSet):
         return Response(DocumentSerializer(document, context={"request": request}).data, status=status.HTTP_201_CREATED)
 
     @action(detail=True, methods=["get"], url_path="attendance-summary")
-    def attendance_summary(self, request, pk=None):
+    def attendance_summary(self, request, id=None):
         staff_profile = self.get_object()
         queryset = StaffAttendanceRecord.objects.filter(campus=staff_profile.campus, staff_user=staff_profile.user)
         return Response(
@@ -2164,7 +2204,7 @@ class StaffProfileViewSet(RoleScopedModelViewSet):
 
 
 class TimetableSlotViewSet(RoleScopedModelViewSet):
-    queryset = TimetableSlot.objects.select_related("campus", "section", "teacher")
+    queryset = TimetableSlot.objects
     serializer_class = TimetableSlotSerializer
     campus_filter_path = "campus_id"
     read_roles = READ_ROLES
@@ -2186,7 +2226,7 @@ class TimetableSlotViewSet(RoleScopedModelViewSet):
 
 
 class ExamTypeViewSet(RoleScopedModelViewSet):
-    queryset = ExamType.objects.select_related("campus")
+    queryset = ExamType.objects
     serializer_class = ExamTypeSerializer
     campus_filter_path = "campus_id"
     read_roles = READ_ROLES
@@ -2209,7 +2249,7 @@ class ExamTypeViewSet(RoleScopedModelViewSet):
 
 
 class ExamSubjectSetupViewSet(RoleScopedModelViewSet):
-    queryset = ExamSubjectSetup.objects.select_related("campus", "exam_type", "section", "subject")
+    queryset = ExamSubjectSetup.objects
     serializer_class = ExamSubjectSetupSerializer
     campus_filter_path = "campus_id"
     read_roles = READ_ROLES
@@ -2230,7 +2270,7 @@ class ExamSubjectSetupViewSet(RoleScopedModelViewSet):
 
 
 class ExamScheduleViewSet(RoleScopedModelViewSet):
-    queryset = ExamSchedule.objects.select_related("campus", "exam_type", "section", "subject", "created_by")
+    queryset = ExamSchedule.objects
     serializer_class = ExamScheduleSerializer
     campus_filter_path = "campus_id"
     read_roles = READ_ROLES
@@ -2260,7 +2300,7 @@ class ExamScheduleViewSet(RoleScopedModelViewSet):
         self.write_audit(AuditAction.UPDATE, instance)
 
     @action(detail=True, methods=["post"], url_path="publish")
-    def publish(self, request, pk=None):
+    def publish(self, request, id=None):
         schedule = self.get_object()
         schedule.status = ExamScheduleStatus.PUBLISHED
         schedule.save(update_fields=["status", "updated_at"])
@@ -2268,7 +2308,7 @@ class ExamScheduleViewSet(RoleScopedModelViewSet):
         return Response(self.get_serializer(schedule).data, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=["post"], url_path="unpublish")
-    def unpublish(self, request, pk=None):
+    def unpublish(self, request, id=None):
         schedule = self.get_object()
         schedule.status = ExamScheduleStatus.DRAFT
         schedule.save(update_fields=["status", "updated_at"])
@@ -2276,7 +2316,7 @@ class ExamScheduleViewSet(RoleScopedModelViewSet):
         return Response(self.get_serializer(schedule).data, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=["post"], url_path="archive")
-    def archive(self, request, pk=None):
+    def archive(self, request, id=None):
         schedule = self.get_object()
         schedule.status = ExamScheduleStatus.ARCHIVED
         schedule.save(update_fields=["status", "updated_at"])
@@ -2285,7 +2325,7 @@ class ExamScheduleViewSet(RoleScopedModelViewSet):
 
 
 class LibraryBookViewSet(RoleScopedModelViewSet):
-    queryset = LibraryBook.objects.select_related("campus")
+    queryset = LibraryBook.objects
     serializer_class = LibraryBookSerializer
     campus_filter_path = "campus_id"
     read_roles = READ_ROLES
@@ -2306,7 +2346,7 @@ class LibraryBookViewSet(RoleScopedModelViewSet):
 
 
 class LibraryLoanViewSet(RoleScopedModelViewSet):
-    queryset = LibraryLoan.objects.select_related("campus", "book", "student", "staff_user")
+    queryset = LibraryLoan.objects
     serializer_class = LibraryLoanSerializer
     campus_filter_path = "campus_id"
     read_roles = READ_ROLES
@@ -2328,7 +2368,7 @@ class LibraryLoanViewSet(RoleScopedModelViewSet):
 
 
 class TransportRouteViewSet(RoleScopedModelViewSet):
-    queryset = TransportRoute.objects.select_related("campus")
+    queryset = TransportRoute.objects
     serializer_class = TransportRouteSerializer
     campus_filter_path = "campus_id"
     read_roles = READ_ROLES
@@ -2349,7 +2389,7 @@ class TransportRouteViewSet(RoleScopedModelViewSet):
 
 
 class TransportVehicleViewSet(RoleScopedModelViewSet):
-    queryset = TransportVehicle.objects.select_related("campus", "route")
+    queryset = TransportVehicle.objects
     serializer_class = TransportVehicleSerializer
     campus_filter_path = "campus_id"
     read_roles = READ_ROLES
@@ -2370,7 +2410,7 @@ class TransportVehicleViewSet(RoleScopedModelViewSet):
 
 
 class StudentTransportAssignmentViewSet(RoleScopedModelViewSet):
-    queryset = StudentTransportAssignment.objects.select_related("student", "route", "vehicle")
+    queryset = StudentTransportAssignment.objects
     serializer_class = StudentTransportAssignmentSerializer
     campus_filter_path = "student__campus_id"
     read_roles = READ_ROLES
@@ -2391,7 +2431,7 @@ class StudentTransportAssignmentViewSet(RoleScopedModelViewSet):
 
 
 class HostelRoomViewSet(RoleScopedModelViewSet):
-    queryset = HostelRoom.objects.select_related("campus")
+    queryset = HostelRoom.objects
     serializer_class = HostelRoomSerializer
     campus_filter_path = "campus_id"
     read_roles = READ_ROLES
@@ -2412,7 +2452,7 @@ class HostelRoomViewSet(RoleScopedModelViewSet):
 
 
 class HostelAllocationViewSet(RoleScopedModelViewSet):
-    queryset = HostelAllocation.objects.select_related("student", "room")
+    queryset = HostelAllocation.objects
     serializer_class = HostelAllocationSerializer
     campus_filter_path = "student__campus_id"
     read_roles = READ_ROLES
@@ -2433,7 +2473,7 @@ class HostelAllocationViewSet(RoleScopedModelViewSet):
 
 
 class ApprovalRequestViewSet(RoleScopedModelViewSet):
-    queryset = ApprovalRequest.objects.select_related("campus", "requested_by", "reviewed_by")
+    queryset = ApprovalRequest.objects
     serializer_class = ApprovalRequestSerializer
     campus_filter_path = "campus_id"
     read_roles = ADMIN_ROLES + (UserRole.TEACHER,)
@@ -2453,7 +2493,7 @@ class ApprovalRequestViewSet(RoleScopedModelViewSet):
         self.write_audit(AuditAction.CREATE, instance)
 
     @action(detail=True, methods=["post"], url_path="approve")
-    def approve(self, request, pk=None):
+    def approve(self, request, id=None):
         if getattr(request.user, "role", None) not in ADMIN_ROLES:
             raise PermissionDenied("Only campus admins can approve requests.")
         approval = self.get_object()
@@ -2466,7 +2506,7 @@ class ApprovalRequestViewSet(RoleScopedModelViewSet):
         return Response(self.get_serializer(approval).data, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=["post"], url_path="reject")
-    def reject(self, request, pk=None):
+    def reject(self, request, id=None):
         if getattr(request.user, "role", None) not in ADMIN_ROLES:
             raise PermissionDenied("Only campus admins can reject requests.")
         approval = self.get_object()
@@ -2480,7 +2520,7 @@ class ApprovalRequestViewSet(RoleScopedModelViewSet):
 
 
 class AnnouncementViewSet(RoleScopedModelViewSet):
-    queryset = Announcement.objects.select_related("campus", "created_by")
+    queryset = Announcement.objects
     serializer_class = AnnouncementSerializer
     campus_filter_path = "campus_id"
     read_roles = READ_ROLES
@@ -2498,7 +2538,7 @@ class AnnouncementViewSet(RoleScopedModelViewSet):
                 ClassSection.objects.filter(teacher_section_q(user)).values_list("campus_id", flat=True).distinct()
             )
         if user.role == UserRole.STUDENT:
-            campus_ids.extend(Student.objects.filter(user=user).values_list("campus_id", flat=True).distinct())
+            campus_ids.extend(Student.objects.filter(user_id=user.pk).values_list("campus_id", flat=True).distinct())
         campus_filter = Q(campus__isnull=True)
         if campus_ids:
             campus_filter |= Q(campus_id__in=list(dict.fromkeys(campus_ids)))
@@ -2532,7 +2572,7 @@ class AnnouncementViewSet(RoleScopedModelViewSet):
         self.write_audit(AuditAction.UPDATE, instance)
 
     @action(detail=True, methods=["post"], url_path="publish")
-    def publish(self, request, pk=None):
+    def publish(self, request, id=None):
         announcement = self.get_object()
         announcement.is_active = True
         announcement.publish_on = timezone.now()
@@ -2548,7 +2588,7 @@ class AnnouncementViewSet(RoleScopedModelViewSet):
         return Response(self.get_serializer(announcement).data, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=["post"], url_path="unpublish")
-    def unpublish(self, request, pk=None):
+    def unpublish(self, request, id=None):
         announcement = self.get_object()
         announcement.is_active = False
         announcement.save(update_fields=["is_active", "updated_at"])
@@ -2556,7 +2596,7 @@ class AnnouncementViewSet(RoleScopedModelViewSet):
         return Response(self.get_serializer(announcement).data, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=["post"], url_path="archive")
-    def archive(self, request, pk=None):
+    def archive(self, request, id=None):
         announcement = self.get_object()
         announcement.is_active = False
         announcement.save(update_fields=["is_active", "updated_at"])
@@ -2565,7 +2605,7 @@ class AnnouncementViewSet(RoleScopedModelViewSet):
 
 
 class SupportTicketViewSet(viewsets.ModelViewSet):
-    queryset = SupportTicket.objects.select_related("campus", "created_by", "reviewed_by")
+    queryset = SupportTicket.objects
     serializer_class = SupportTicketSerializer
     permission_classes = [RoleAccessPermission]
     read_roles = READ_ROLES
@@ -2579,6 +2619,9 @@ class SupportTicketViewSet(viewsets.ModelViewSet):
         user = self.request.user
         status_filter = self.request.query_params.get("status")
         if status_filter:
+            from apps.core.input import validate_enum_value
+            from apps.core.mongo_models import SupportTicketStatusEnum
+            status_filter = validate_enum_value(status_filter, SupportTicketStatusEnum)
             queryset = queryset.filter(status=status_filter)
         if getattr(user, "role", None) == UserRole.SUPER_ADMIN:
             return queryset
@@ -2587,8 +2630,8 @@ class SupportTicketViewSet(viewsets.ModelViewSet):
     def perform_create(self, serializer):
         campus = serializer.validated_data.get("campus")
         if campus is None:
-            membership = CampusMembership.objects.filter(user=self.request.user, is_primary=True).first()
-            membership = membership or CampusMembership.objects.filter(user=self.request.user).first()
+            membership = CampusMembership.objects.filter(user_id=self.request.user.pk, is_primary=True).first()
+            membership = membership or CampusMembership.objects.filter(user_id=self.request.user.pk).first()
             campus = membership.campus if membership else None
         ticket = serializer.save(created_by=self.request.user, campus=campus)
         AuditEvent.objects.create(
@@ -2632,7 +2675,7 @@ class SupportTicketViewSet(viewsets.ModelViewSet):
 
 
 class AssignedWorkViewSet(RoleScopedModelViewSet):
-    queryset = AssignedWork.objects.select_related("section", "section__campus", "assigned_by").annotate(submission_count=Count("submissions"))
+    queryset = AssignedWork.objects.annotate(submission_count=Count("submissions"))
     serializer_class = AssignedWorkSerializer
     campus_filter_path = "section__campus_id"
     read_roles = READ_ROLES
@@ -2726,7 +2769,7 @@ class AssignedWorkViewSet(RoleScopedModelViewSet):
         return Response(self.get_serializer(instance).data, status=status.HTTP_201_CREATED)
 
     @action(detail=True, methods=["get"], url_path="download")
-    def download(self, request, pk=None):
+    def download(self, request, id=None):
         assignment = self.get_object()
         AuditEvent.objects.create(
             actor=request.user,
@@ -2739,7 +2782,7 @@ class AssignedWorkViewSet(RoleScopedModelViewSet):
         return protected_data_url_response(assignment.file_url, assignment.file_name or f"assignment-{assignment.id}", assignment.file_content_type)
 
     @action(detail=True, methods=["post"], url_path="publish")
-    def publish(self, request, pk=None):
+    def publish(self, request, id=None):
         assignment = self.get_object()
         if getattr(request.user, "role", None) == UserRole.TEACHER and assignment.assigned_by_id != request.user.id:
             raise PermissionDenied("Teachers can publish only assignments they created.")
@@ -2757,7 +2800,7 @@ class AssignedWorkViewSet(RoleScopedModelViewSet):
         return Response(self.get_serializer(assignment).data, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=["post"], url_path="unpublish")
-    def unpublish(self, request, pk=None):
+    def unpublish(self, request, id=None):
         assignment = self.get_object()
         if getattr(request.user, "role", None) == UserRole.TEACHER and assignment.assigned_by_id != request.user.id:
             raise PermissionDenied("Teachers can unpublish only assignments they created.")
@@ -2767,7 +2810,7 @@ class AssignedWorkViewSet(RoleScopedModelViewSet):
         return Response(self.get_serializer(assignment).data, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=["post"], url_path="submit", parser_classes=[MultiPartParser, FormParser])
-    def submit(self, request, pk=None):
+    def submit(self, request, id=None):
         if getattr(request.user, "role", None) != UserRole.STUDENT:
             raise PermissionDenied("Only students can submit assignments.")
         assignment = self.get_object()
@@ -2805,24 +2848,17 @@ class AssignedWorkViewSet(RoleScopedModelViewSet):
         return Response(AssignmentSubmissionSerializer(submission, context={"request": request}).data, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=["get"], url_path="submissions")
-    def submissions(self, request, pk=None):
+    def submissions(self, request, id=None):
         assignment = self.get_object()
         if getattr(request.user, "role", None) == UserRole.STUDENT:
             raise PermissionDenied("Students cannot view the class submission list.")
-        queryset = assignment.submissions.select_related("assignment", "assignment__section", "student", "submitted_by", "checked_by")
+        queryset = assignment.submissions
         serializer = AssignmentSubmissionSerializer(queryset, many=True, context={"request": request})
         return Response(serializer.data, status=status.HTTP_200_OK)
 
 
 class AssignmentSubmissionViewSet(RoleScopedModelViewSet):
-    queryset = AssignmentSubmission.objects.select_related(
-        "assignment",
-        "assignment__section",
-        "assignment__section__campus",
-        "student",
-        "submitted_by",
-        "checked_by",
-    )
+    queryset = AssignmentSubmission.objects
     serializer_class = AssignmentSubmissionSerializer
     campus_filter_path = "assignment__section__campus_id"
     read_roles = READ_ROLES
@@ -2856,7 +2892,7 @@ class AssignmentSubmissionViewSet(RoleScopedModelViewSet):
         self.write_audit(AuditAction.CREATE, instance)
 
     @action(detail=True, methods=["get"], url_path="download")
-    def download(self, request, pk=None):
+    def download(self, request, id=None):
         submission = self.get_object()
         AuditEvent.objects.create(
             actor=request.user,
@@ -2869,7 +2905,7 @@ class AssignmentSubmissionViewSet(RoleScopedModelViewSet):
         return protected_data_url_response(submission.file_url, submission.file_name or f"submission-{submission.id}", submission.file_content_type)
 
     @action(detail=True, methods=["post"], url_path="mark-checked")
-    def mark_checked(self, request, pk=None):
+    def mark_checked(self, request, id=None):
         submission = self.get_object()
         if getattr(request.user, "role", None) == UserRole.STUDENT:
             raise PermissionDenied("Students cannot check submissions.")
@@ -2882,7 +2918,7 @@ class AssignmentSubmissionViewSet(RoleScopedModelViewSet):
         return Response(self.get_serializer(submission).data, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=["post"], url_path="add-remarks")
-    def add_remarks(self, request, pk=None):
+    def add_remarks(self, request, id=None):
         submission = self.get_object()
         if getattr(request.user, "role", None) == UserRole.STUDENT:
             raise PermissionDenied("Students cannot add teacher remarks.")
@@ -2895,7 +2931,7 @@ class AssignmentSubmissionViewSet(RoleScopedModelViewSet):
 
 
 class LearningResourceViewSet(RoleScopedModelViewSet):
-    queryset = LearningResource.objects.select_related("section", "section__campus", "uploaded_by")
+    queryset = LearningResource.objects
     serializer_class = LearningResourceSerializer
     campus_filter_path = "section__campus_id"
     read_roles = READ_ROLES
@@ -2970,7 +3006,7 @@ class LearningResourceViewSet(RoleScopedModelViewSet):
         return Response(self.get_serializer(instance).data, status=status.HTTP_201_CREATED)
 
     @action(detail=True, methods=["get"], url_path="download")
-    def download(self, request, pk=None):
+    def download(self, request, id=None):
         resource = self.get_object()
         AuditEvent.objects.create(
             actor=request.user,
@@ -2983,7 +3019,7 @@ class LearningResourceViewSet(RoleScopedModelViewSet):
         return protected_data_url_response(resource.file_url, resource.file_name or f"resource-{resource.id}", resource.file_content_type)
 
     @action(detail=True, methods=["post"], url_path="publish")
-    def publish(self, request, pk=None):
+    def publish(self, request, id=None):
         resource = self.get_object()
         if getattr(request.user, "role", None) == UserRole.TEACHER and resource.uploaded_by_id != request.user.id:
             raise PermissionDenied("Teachers can publish only notes they uploaded.")
@@ -3001,7 +3037,7 @@ class LearningResourceViewSet(RoleScopedModelViewSet):
         return Response(self.get_serializer(resource).data, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=["post"], url_path="unpublish")
-    def unpublish(self, request, pk=None):
+    def unpublish(self, request, id=None):
         resource = self.get_object()
         if getattr(request.user, "role", None) == UserRole.TEACHER and resource.uploaded_by_id != request.user.id:
             raise PermissionDenied("Teachers can unpublish only notes they uploaded.")
@@ -3012,7 +3048,7 @@ class LearningResourceViewSet(RoleScopedModelViewSet):
 
 
 class ResultRecordViewSet(RoleScopedModelViewSet):
-    queryset = ResultRecord.objects.select_related("student", "student__campus", "student__section", "recorded_by", "reviewed_by")
+    queryset = ResultRecord.objects
     serializer_class = ResultRecordSerializer
     campus_filter_path = "student__campus_id"
     read_roles = READ_ROLES
@@ -3058,7 +3094,7 @@ class ResultRecordViewSet(RoleScopedModelViewSet):
         self.write_audit(AuditAction.UPDATE, instance)
 
     @action(detail=True, methods=["post"], url_path="upload-marks", parser_classes=[MultiPartParser, FormParser])
-    def upload_marks(self, request, pk=None):
+    def upload_marks(self, request, id=None):
         result = self.get_object()
         if getattr(request.user, "role", None) == UserRole.TEACHER and result.recorded_by_id != request.user.id:
             raise PermissionDenied("Teachers can upload files only for marks they created.")
@@ -3081,12 +3117,12 @@ class ResultRecordViewSet(RoleScopedModelViewSet):
         return Response(self.get_serializer(result).data, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=["get"], url_path="download-marks-file")
-    def download_marks_file(self, request, pk=None):
+    def download_marks_file(self, request, id=None):
         result = self.get_object()
         return protected_data_url_response(result.marks_file_url, result.marks_file_name or f"marks-{result.id}", result.marks_file_content_type)
 
     @action(detail=True, methods=["post"], url_path="submit-review")
-    def submit_review(self, request, pk=None):
+    def submit_review(self, request, id=None):
         result = self.get_object()
         if getattr(request.user, "role", None) != UserRole.TEACHER:
             raise PermissionDenied("Only teachers can submit marks for review.")
@@ -3107,7 +3143,7 @@ class ResultRecordViewSet(RoleScopedModelViewSet):
         return Response(self.get_serializer(result).data, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=["post"], url_path="approve")
-    def approve(self, request, pk=None):
+    def approve(self, request, id=None):
         if getattr(request.user, "role", None) not in ADMIN_ROLES:
             raise PermissionDenied("Only school admins can approve marks.")
         result = self.get_object()
@@ -3120,7 +3156,7 @@ class ResultRecordViewSet(RoleScopedModelViewSet):
         return Response(self.get_serializer(result).data, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=["post"], url_path="reject")
-    def reject(self, request, pk=None):
+    def reject(self, request, id=None):
         if getattr(request.user, "role", None) not in ADMIN_ROLES:
             raise PermissionDenied("Only school admins can reject marks.")
         result = self.get_object()
@@ -3134,7 +3170,7 @@ class ResultRecordViewSet(RoleScopedModelViewSet):
         return Response(self.get_serializer(result).data, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=["post"], url_path="publish")
-    def publish(self, request, pk=None):
+    def publish(self, request, id=None):
         if getattr(request.user, "role", None) not in ADMIN_ROLES:
             raise PermissionDenied("Only school admins can publish results.")
         result = self.get_object()
@@ -3156,7 +3192,7 @@ class ResultRecordViewSet(RoleScopedModelViewSet):
         return Response(self.get_serializer(result).data, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=["post"], url_path="unpublish")
-    def unpublish(self, request, pk=None):
+    def unpublish(self, request, id=None):
         if getattr(request.user, "role", None) not in ADMIN_ROLES:
             raise PermissionDenied("Only school admins can unpublish results.")
         result = self.get_object()
@@ -3166,7 +3202,7 @@ class ResultRecordViewSet(RoleScopedModelViewSet):
         return Response(self.get_serializer(result).data, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=["get"], url_path="download-result")
-    def download_result(self, request, pk=None):
+    def download_result(self, request, id=None):
         result = self.get_object()
         lines = [
             f"School: {result.student.campus.name} ({result.student.campus.code})",
@@ -3193,7 +3229,7 @@ class ResultRecordViewSet(RoleScopedModelViewSet):
 
 
 class AdmitCardViewSet(RoleScopedModelViewSet):
-    queryset = AdmitCard.objects.select_related("student", "student__section", "issued_by")
+    queryset = AdmitCard.objects
     serializer_class = AdmitCardSerializer
     campus_filter_path = "student__campus_id"
     read_roles = READ_ROLES
@@ -3220,7 +3256,7 @@ class AdmitCardViewSet(RoleScopedModelViewSet):
 
 
 class FeeStructureViewSet(RoleScopedModelViewSet):
-    queryset = FeeStructure.objects.select_related("campus", "section", "created_by")
+    queryset = FeeStructure.objects
     serializer_class = FeeStructureSerializer
     campus_filter_path = "campus_id"
     read_roles = ACCOUNT_ROLES
@@ -3246,7 +3282,7 @@ class FeeStructureViewSet(RoleScopedModelViewSet):
         self.write_audit(AuditAction.UPDATE, instance)
 
     @action(detail=True, methods=["post"], url_path="assign")
-    def assign(self, request, pk=None):
+    def assign(self, request, id=None):
         fee_structure = self.get_object()
         student_ids = request.data.get("student_ids") or []
         section_id = request.data.get("section") or fee_structure.section_id
@@ -3260,7 +3296,7 @@ class FeeStructureViewSet(RoleScopedModelViewSet):
             students = students.filter(section=section)
         created = 0
         updated = 0
-        for student in students.select_related("section"):
+        for student in students:
             assignment, was_created = FeeAssignment.objects.get_or_create(
                 fee_structure=fee_structure,
                 student=student,
@@ -3287,7 +3323,7 @@ class FeeStructureViewSet(RoleScopedModelViewSet):
 
 
 class PaymentGatewayConfigViewSet(RoleScopedModelViewSet):
-    queryset = PaymentGatewayConfig.objects.select_related("campus", "created_by")
+    queryset = PaymentGatewayConfig.objects
     serializer_class = PaymentGatewayConfigSerializer
     campus_filter_path = "campus_id"
     read_roles = ACCOUNT_ROLES
@@ -3314,7 +3350,7 @@ class PaymentGatewayConfigViewSet(RoleScopedModelViewSet):
 
 
 class FeeAssignmentViewSet(RoleScopedModelViewSet):
-    queryset = FeeAssignment.objects.select_related("fee_structure", "student", "student__campus", "student__section")
+    queryset = FeeAssignment.objects
     serializer_class = FeeAssignmentSerializer
     campus_filter_path = "student__campus_id"
     read_roles = ACCOUNT_ROLES + (UserRole.STUDENT,)
@@ -3342,13 +3378,13 @@ class FeeAssignmentViewSet(RoleScopedModelViewSet):
         self.write_audit(AuditAction.UPDATE, instance)
 
     @action(detail=True, methods=["post"], url_path="generate-invoice")
-    def generate_invoice(self, request, pk=None):
+    def generate_invoice(self, request, id=None):
         fee_assignment = ensure_fee_invoice(self.get_object())
         self.write_audit(AuditAction.UPDATE, fee_assignment)
         return Response(self.get_serializer(fee_assignment).data, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=["get"], url_path="invoice-pdf")
-    def invoice_pdf(self, request, pk=None):
+    def invoice_pdf(self, request, id=None):
         fee_assignment = ensure_fee_invoice(self.get_object())
         response = HttpResponse(simple_pdf_bytes(f"Invoice - {fee_assignment.invoice_number}", fee_invoice_lines(fee_assignment)), content_type="application/pdf")
         response["Content-Disposition"] = f'attachment; filename="{fee_assignment.invoice_number}.pdf"'
@@ -3363,7 +3399,7 @@ class FeeAssignmentViewSet(RoleScopedModelViewSet):
         return response
 
     @action(detail=True, methods=["post"], url_path="send-reminder")
-    def send_reminder(self, request, pk=None):
+    def send_reminder(self, request, id=None):
         fee_assignment = self.get_object()
         channel = request.data.get("channel") or MessageChannel.EMAIL
         if channel not in MessageChannel.values:
@@ -3400,7 +3436,7 @@ class FeeAssignmentViewSet(RoleScopedModelViewSet):
 
 
 class PaymentViewSet(RoleScopedModelViewSet):
-    queryset = Payment.objects.select_related("campus", "fee_assignment", "fee_assignment__student", "collected_by")
+    queryset = Payment.objects
     serializer_class = PaymentSerializer
     campus_filter_path = "campus_id"
     read_roles = ACCOUNT_ROLES + (UserRole.STUDENT,)
@@ -3444,7 +3480,7 @@ class PaymentViewSet(RoleScopedModelViewSet):
         self.write_audit(AuditAction.CREATE, instance)
 
     @action(detail=True, methods=["get"], url_path="receipt-pdf")
-    def receipt_pdf(self, request, pk=None):
+    def receipt_pdf(self, request, id=None):
         payment = self.get_object()
         if not payment.receipt_number:
             payment.receipt_number = next_finance_number(payment.campus or payment.fee_assignment.student.campus, "REC", Payment, "receipt_number")
@@ -3462,7 +3498,7 @@ class PaymentViewSet(RoleScopedModelViewSet):
         return response
 
     @action(detail=True, methods=["post"], url_path="send-receipt")
-    def send_receipt(self, request, pk=None):
+    def send_receipt(self, request, id=None):
         payment = self.get_object()
         student = payment.fee_assignment.student
         channel = request.data.get("channel") or MessageChannel.EMAIL
@@ -3486,7 +3522,7 @@ class PaymentViewSet(RoleScopedModelViewSet):
 
 
 class PaymentTransactionViewSet(RoleScopedModelViewSet):
-    queryset = PaymentTransaction.objects.select_related("campus", "student", "fee_assignment", "payment", "created_by")
+    queryset = PaymentTransaction.objects
     serializer_class = PaymentTransactionSerializer
     campus_filter_path = "campus_id"
     read_roles = ACCOUNT_ROLES + (UserRole.STUDENT,)
@@ -3548,7 +3584,7 @@ class PaymentTransactionViewSet(RoleScopedModelViewSet):
     @action(detail=False, methods=["post"], url_path="create-order")
     def create_order(self, request):
         fee_assignment = get_object_or_404(
-            FeeAssignment.objects.select_related("student", "student__campus"),
+            FeeAssignment.objects,
             id=request.data.get("fee_assignment"),
         )
         self._assert_fee_visible(fee_assignment)
@@ -3632,7 +3668,7 @@ class PaymentTransactionViewSet(RoleScopedModelViewSet):
         return transaction_obj
 
     @action(detail=True, methods=["post"], url_path="verify-payment")
-    def verify_payment(self, request, pk=None):
+    def verify_payment(self, request, id=None):
         transaction_obj = self.get_object()
         if getattr(request.user, "role", None) == UserRole.STUDENT and transaction_obj.student.user_id != request.user.id:
             raise PermissionDenied("Students can verify only their own payment transactions.")
@@ -3643,8 +3679,8 @@ class PaymentTransactionViewSet(RoleScopedModelViewSet):
         return Response(self.get_serializer(transaction_obj).data, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=["post"], url_path="verify-razorpay")
-    def verify_razorpay(self, request, pk=None):
-        return self.verify_payment(request, pk=pk)
+    def verify_razorpay(self, request, id=None):
+        return self.verify_payment(request, id=pk)
 
     @action(detail=False, methods=["post"], url_path="webhook", permission_classes=[AllowAny], authentication_classes=[])
     def webhook(self, request):
@@ -3655,7 +3691,7 @@ class PaymentTransactionViewSet(RoleScopedModelViewSet):
         amount_raw = request.data.get("amount")
         if not all([school_id, order_id, payment_id, signature]):
             raise ValidationError({"webhook": "schoolId, orderId, paymentId, and signature are required."})
-        transaction_obj = get_object_or_404(PaymentTransaction.objects.select_related("campus", "fee_assignment"), gateway_order_id=order_id)
+        transaction_obj = get_object_or_404(PaymentTransaction.objects, gateway_order_id=order_id)
         campus_match = str(transaction_obj.campus_id) == str(school_id) or transaction_obj.campus.code == str(school_id)
         if not campus_match:
             raise PermissionDenied("Webhook schoolId does not match the transaction school.")
@@ -3668,7 +3704,7 @@ class PaymentTransactionViewSet(RoleScopedModelViewSet):
         expected = payment_signature(secret, order_id, payment_id)
         if not hmac.compare_digest(expected, str(signature)):
             transaction_obj.status = TransactionStatus.FAILED
-            transaction_obj.raw_payload = {**transaction_obj.raw_payload, "webhook_error": "Signature mismatch", "webhook": request.data}
+            transaction_obj.raw_payload = {**transaction_obj.raw_payload, "webhook_error": "Signature mismatch", "webhook": sanitize_webhook_payload(request.data)}
             transaction_obj.save(update_fields=["status", "raw_payload", "updated_at"])
             emit_finance_event(
                 transaction_obj.campus,
@@ -3676,13 +3712,13 @@ class PaymentTransactionViewSet(RoleScopedModelViewSet):
                 {"transactionId": transaction_obj.id, "orderId": order_id, "reason": "webhook_signature_mismatch"},
             )
             raise ValidationError({"signature": "Webhook signature verification failed."})
-        transaction_obj.raw_payload = {**transaction_obj.raw_payload, "webhook": request.data}
+        transaction_obj.raw_payload = {**transaction_obj.raw_payload, "webhook": sanitize_webhook_payload(request.data)}
         transaction_obj.save(update_fields=["raw_payload", "updated_at"])
         self._verify_gateway_transaction(transaction_obj, payment_id=payment_id, signature=signature, secret_override=secret)
         return Response({"status": "verified", "transaction": transaction_obj.id}, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=["get"], url_path="receipt-pdf")
-    def receipt_pdf(self, request, pk=None):
+    def receipt_pdf(self, request, id=None):
         transaction_obj = self.get_object()
         if not transaction_obj.payment_id:
             raise ValidationError({"payment": "Receipt is available only after successful payment."})
@@ -3693,7 +3729,7 @@ class PaymentTransactionViewSet(RoleScopedModelViewSet):
 
 
 class SalarySetupViewSet(RoleScopedModelViewSet):
-    queryset = SalarySetup.objects.select_related("campus", "staff_user", "created_by")
+    queryset = SalarySetup.objects
     serializer_class = SalarySetupSerializer
     campus_filter_path = "campus_id"
     read_roles = ACCOUNT_ROLES + (UserRole.TEACHER,)
@@ -3722,7 +3758,7 @@ class SalarySetupViewSet(RoleScopedModelViewSet):
 
 
 class SalaryRecordViewSet(RoleScopedModelViewSet):
-    queryset = SalaryRecord.objects.select_related("campus", "salary_setup", "staff_user", "created_by", "paid_by")
+    queryset = SalaryRecord.objects
     serializer_class = SalaryRecordSerializer
     campus_filter_path = "campus_id"
     read_roles = ACCOUNT_ROLES + (UserRole.TEACHER,)
@@ -3751,7 +3787,7 @@ class SalaryRecordViewSet(RoleScopedModelViewSet):
 
     @action(detail=False, methods=["post"], url_path="calculate")
     def calculate(self, request):
-        setup = get_object_or_404(SalarySetup.objects.select_related("campus", "staff_user"), id=request.data.get("salary_setup"))
+        setup = get_object_or_404(SalarySetup.objects, id=request.data.get("salary_setup"))
         if getattr(request.user, "role", None) != UserRole.SUPER_ADMIN and setup.campus_id not in self.admin_campus_ids():
             raise PermissionDenied("This salary setup belongs to another school.")
         month = int(request.data.get("month") or timezone.localdate().month)
@@ -3793,7 +3829,7 @@ class SalaryRecordViewSet(RoleScopedModelViewSet):
         return Response(self.get_serializer(salary).data, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=["post"], url_path="mark-paid")
-    def mark_paid(self, request, pk=None):
+    def mark_paid(self, request, id=None):
         salary = self.get_object()
         salary.payment_status = SalaryPaymentStatus.PAID
         salary.paid_on = request.data.get("paid_on") or timezone.localdate()
@@ -3812,7 +3848,7 @@ class SalaryRecordViewSet(RoleScopedModelViewSet):
         return Response(self.get_serializer(salary).data, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=["get"], url_path="salary-slip-pdf")
-    def salary_slip_pdf(self, request, pk=None):
+    def salary_slip_pdf(self, request, id=None):
         salary = self.get_object()
         if not salary.slip_number:
             salary.slip_number = next_finance_number(salary.campus, "SAL", SalaryRecord, "slip_number")
@@ -3830,7 +3866,7 @@ class SalaryRecordViewSet(RoleScopedModelViewSet):
         return response
 
     @action(detail=True, methods=["post"], url_path="send-slip")
-    def send_slip(self, request, pk=None):
+    def send_slip(self, request, id=None):
         salary = self.get_object()
         channel = request.data.get("channel") or MessageChannel.EMAIL
         if channel not in MessageChannel.values:
@@ -3852,7 +3888,7 @@ class SalaryRecordViewSet(RoleScopedModelViewSet):
 
 
 class FinanceEventViewSet(viewsets.ReadOnlyModelViewSet):
-    queryset = FinanceEvent.objects.select_related("campus", "created_by")
+    queryset = FinanceEvent.objects
     serializer_class = FinanceEventSerializer
     permission_classes = [RoleAccessPermission]
     read_roles = ACCOUNT_ROLES + (UserRole.STUDENT,)
@@ -3865,7 +3901,7 @@ class FinanceEventViewSet(viewsets.ReadOnlyModelViewSet):
             return list(Campus.objects.values_list("id", flat=True))
         if getattr(user, "school_id", None):
             return [user.school_id]
-        return list(CampusMembership.objects.filter(user=user).values_list("campus_id", flat=True).distinct())
+        return list(CampusMembership.objects.filter(user_id=user.pk).values_list("campus_id", flat=True).distinct())
 
     def get_queryset(self):
         queryset = super().get_queryset()
@@ -3876,7 +3912,7 @@ class FinanceEventViewSet(viewsets.ReadOnlyModelViewSet):
             campus_ids = self.admin_campus_ids()
             return queryset.filter(campus_id__in=campus_ids) if campus_ids else queryset.none()
         if user.role == UserRole.STUDENT:
-            student = Student.objects.filter(user=user).first()
+            student = Student.objects.filter(user_id=user.pk).first()
             return queryset.filter(payload__studentId=student.id) if student else queryset.none()
         return queryset.none()
 
@@ -3889,7 +3925,7 @@ class FinanceEventViewSet(viewsets.ReadOnlyModelViewSet):
             while True:
                 events = (
                     scoped_events.filter(id__gt=last_id)
-                    .select_related("campus")
+                    
                     .order_by("id")[:20]
                 )
                 sent = False
@@ -3907,7 +3943,7 @@ class FinanceEventViewSet(viewsets.ReadOnlyModelViewSet):
 
 
 class AcademicEventViewSet(viewsets.ReadOnlyModelViewSet):
-    queryset = AcademicEvent.objects.select_related("campus", "student", "teacher", "created_by")
+    queryset = AcademicEvent.objects
     serializer_class = AcademicEventSerializer
     permission_classes = [RoleAccessPermission]
     read_roles = READ_ROLES
@@ -3920,7 +3956,7 @@ class AcademicEventViewSet(viewsets.ReadOnlyModelViewSet):
             return list(Campus.objects.values_list("id", flat=True))
         if getattr(user, "school_id", None):
             return [user.school_id]
-        return list(CampusMembership.objects.filter(user=user).values_list("campus_id", flat=True).distinct())
+        return list(CampusMembership.objects.filter(user_id=user.pk).values_list("campus_id", flat=True).distinct())
 
     def get_queryset(self):
         queryset = super().get_queryset()
@@ -3947,7 +3983,7 @@ class AcademicEventViewSet(viewsets.ReadOnlyModelViewSet):
                 teacher_filter |= Q(payload__sectionId__in=subject_sections)
             return queryset.filter(campus_id__in=teacher_campuses).filter(teacher_filter).distinct() if teacher_campuses else queryset.none()
         if user.role == UserRole.STUDENT:
-            student = Student.objects.filter(user=user).select_related("campus", "section").first()
+            student = Student.objects.filter(user_id=user.pk).first()
             if not student:
                 return queryset.none()
             return queryset.filter(
@@ -3973,7 +4009,7 @@ class AcademicEventViewSet(viewsets.ReadOnlyModelViewSet):
         def event_stream():
             last_id = int(request.query_params.get("last_id") or 0)
             while True:
-                events = scoped_events.filter(id__gt=last_id).select_related("campus").order_by("id")[:20]
+                events = scoped_events.filter(id__gt=last_id).order_by("id")[:20]
                 sent = False
                 for event in events:
                     last_id = event.id
@@ -4072,7 +4108,7 @@ class FinanceReportView(APIView):
         if getattr(user, "school_id", None):
             campus_ids = [user.school_id]
         else:
-            campus_ids = list(CampusMembership.objects.filter(user=user).values_list("campus_id", flat=True).distinct())
+            campus_ids = list(CampusMembership.objects.filter(user_id=user.pk).values_list("campus_id", flat=True).distinct())
         if requested_campus:
             requested_id = int(requested_campus)
             if requested_id not in campus_ids:
@@ -4087,10 +4123,10 @@ class FinanceReportView(APIView):
             raise PermissionDenied("No school is assigned to this account.")
         file_format = request.query_params.get("file_format") or request.query_params.get("format") or "excel"
         today = timezone.localdate()
-        payments = Payment.objects.filter(Q(campus_id__in=campus_ids) | Q(fee_assignment__student__campus_id__in=campus_ids)).select_related("campus", "fee_assignment", "fee_assignment__student")
-        fees = FeeAssignment.objects.filter(student__campus_id__in=campus_ids).select_related("student", "student__campus")
-        transactions = PaymentTransaction.objects.filter(campus_id__in=campus_ids).select_related("campus", "student", "fee_assignment")
-        salaries = SalaryRecord.objects.filter(campus_id__in=campus_ids).select_related("campus", "staff_user")
+        payments = Payment.objects.filter(Q(campus_id__in=campus_ids) | Q(fee_assignment__student__campus_id__in=campus_ids))
+        fees = FeeAssignment.objects.filter(student__campus_id__in=campus_ids)
+        transactions = PaymentTransaction.objects.filter(campus_id__in=campus_ids)
+        salaries = SalaryRecord.objects.filter(campus_id__in=campus_ids)
 
         if report_type == "fee-collection":
             headers = ["School", "Student", "Fee", "Receipt", "Amount", "Mode", "Paid On", "Status"]
@@ -4230,7 +4266,7 @@ class FinanceReportView(APIView):
 
 
 class DeviceSyncLogViewSet(RoleScopedModelViewSet):
-    queryset = DeviceSyncLog.objects.select_related("campus", "device", "created_by")
+    queryset = DeviceSyncLog.objects
     serializer_class = DeviceSyncLogSerializer
     campus_filter_path = "campus_id"
     read_roles = ADMIN_ROLES + (UserRole.TEACHER,)
@@ -4259,7 +4295,7 @@ class DeviceSyncLogViewSet(RoleScopedModelViewSet):
         self.write_audit(AuditAction.CREATE, instance)
 
     @action(detail=True, methods=["post"], url_path="retry")
-    def retry(self, request, pk=None):
+    def retry(self, request, id=None):
         log = self.get_object()
         retry_log = record_device_sync(
             log.device,
@@ -4299,7 +4335,10 @@ TEMPLATE_VARIABLES = [
 
 
 def render_message_text(template_text: str, variables: dict) -> str:
+    from apps.core.input import sanitize_template_variables
+
     rendered = template_text or ""
+    variables = sanitize_template_variables(variables)
     for key in TEMPLATE_VARIABLES + list(variables.keys()):
         value = str(variables.get(key, ""))
         rendered = rendered.replace(f"{{{{{key}}}}}", value).replace(f"{{{key}}}", value)
@@ -4307,7 +4346,7 @@ def render_message_text(template_text: str, variables: dict) -> str:
 
 
 class CommunicationSettingViewSet(RoleScopedModelViewSet):
-    queryset = CommunicationSetting.objects.select_related("campus", "created_by")
+    queryset = CommunicationSetting.objects
     serializer_class = CommunicationSettingSerializer
     campus_filter_path = "campus_id"
     read_roles = ACCOUNT_ROLES
@@ -4333,7 +4372,7 @@ class CommunicationSettingViewSet(RoleScopedModelViewSet):
         self.write_audit(AuditAction.UPDATE, instance)
 
     @action(detail=True, methods=["post"], url_path="test")
-    def test_provider(self, request, pk=None):
+    def test_provider(self, request, id=None):
         setting = self.get_object()
         recipient = request.data.get("recipient") or request.user.email or request.user.phone_number
         if not recipient:
@@ -4354,7 +4393,7 @@ class CommunicationSettingViewSet(RoleScopedModelViewSet):
 
 
 class MessageTemplateViewSet(RoleScopedModelViewSet):
-    queryset = MessageTemplate.objects.select_related("campus", "created_by")
+    queryset = MessageTemplate.objects
     serializer_class = MessageTemplateSerializer
     campus_filter_path = "campus_id"
     read_roles = ACCOUNT_ROLES
@@ -4381,7 +4420,7 @@ class MessageTemplateViewSet(RoleScopedModelViewSet):
 
     @action(detail=False, methods=["post"], url_path="seed-defaults")
     def seed_defaults(self, request):
-        campus = get_object_or_404(Campus, pk=request.data.get("campus"))
+        campus = get_object_or_404(Campus, id=request.data.get("campus"))
         if getattr(request.user, "role", None) != UserRole.SUPER_ADMIN and campus.id not in self.admin_campus_ids():
             raise PermissionDenied("This school is outside your scope.")
         created_or_updated = []
@@ -4412,7 +4451,7 @@ class MessageTemplateViewSet(RoleScopedModelViewSet):
         return Response(self.get_serializer(created_or_updated, many=True).data, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=["post"], url_path="render")
-    def render(self, request, pk=None):
+    def render(self, request, id=None):
         template = self.get_object()
         variables = request.data.get("variables") or {}
         return Response(
@@ -4426,7 +4465,7 @@ class MessageTemplateViewSet(RoleScopedModelViewSet):
 
 
 class OutboundMessageViewSet(RoleScopedModelViewSet):
-    queryset = OutboundMessage.objects.select_related("campus", "template", "recipient_user", "student", "created_by")
+    queryset = OutboundMessage.objects
     serializer_class = OutboundMessageSerializer
     campus_filter_path = "campus_id"
     read_roles = ACCOUNT_ROLES + (UserRole.STUDENT,)
@@ -4455,16 +4494,16 @@ class OutboundMessageViewSet(RoleScopedModelViewSet):
 
     @action(detail=False, methods=["post"], url_path="send-template")
     def send_template(self, request):
-        template = get_object_or_404(MessageTemplate.objects.select_related("campus"), pk=request.data.get("template"))
-        campus = template.campus or get_object_or_404(Campus, pk=request.data.get("campus"))
+        template = get_object_or_404(MessageTemplate.objects, id=request.data.get("template"))
+        campus = template.campus or get_object_or_404(Campus, id=request.data.get("campus"))
         if getattr(request.user, "role", None) != UserRole.SUPER_ADMIN and campus.id not in self.admin_campus_ids():
             raise PermissionDenied("This communication belongs to another school.")
         student = None
         if request.data.get("student"):
-            student = get_object_or_404(Student, pk=request.data.get("student"), campus=campus)
+            student = get_object_or_404(Student, id=request.data.get("student"), campus=campus)
         recipient_user = None
         if request.data.get("recipient_user"):
-            recipient_user = get_object_or_404(User, pk=request.data.get("recipient_user"))
+            recipient_user = get_object_or_404(User, id=request.data.get("recipient_user"))
             if getattr(recipient_user, "school_id", None) and recipient_user.school_id != campus.id:
                 raise PermissionDenied("Recipient belongs to another school.")
         variables = request.data.get("variables") or {}
@@ -4493,7 +4532,7 @@ class OutboundMessageViewSet(RoleScopedModelViewSet):
         return Response(self.get_serializer(message).data, status=status.HTTP_201_CREATED)
 
     @action(detail=True, methods=["post"], url_path="mark-sent")
-    def mark_sent(self, request, pk=None):
+    def mark_sent(self, request, id=None):
         message = self.get_object()
         message.status = "sent"
         message.sent_at = timezone.now()
@@ -4547,7 +4586,7 @@ AI_FEATURES_BY_ROLE = {
 def ai_campus_for_request(user, requested_campus=None) -> Campus | None:
     if user.role == UserRole.SUPER_ADMIN:
         if requested_campus:
-            return get_object_or_404(Campus, pk=requested_campus)
+            return get_object_or_404(Campus, id=requested_campus)
         return None
     campus = primary_school_for_user(user)
     if not campus:
@@ -4607,7 +4646,7 @@ def build_ai_response(user, feature: str, prompt: str, campus: Campus | None) ->
 
     if user.role == UserRole.SCHOOL_ADMIN:
         if feature == "low_attendance_student_detection":
-            students = Student.objects.filter(campus=campus).select_related("section")[:200]
+            students = Student.objects.filter(campus=campus)[:200]
             low = [(student.full_name, student_attendance_percentage(student)) for student in students]
             low = [item for item in low if item[1] and item[1] < 75][:10]
             return "Low attendance students: " + (", ".join(f"{name} ({pct}%)" for name, pct in low) or "none below 75%."), metadata
@@ -4668,7 +4707,7 @@ def build_ai_response(user, feature: str, prompt: str, campus: Campus | None) ->
             return f"Lesson plan for {topic}: objective, 10-minute warm-up, concept explanation, guided practice, assessment questions, and homework task.", metadata
 
     if user.role == UserRole.STUDENT:
-        student = Student.objects.filter(user=user, campus=campus).select_related("section").first()
+        student = Student.objects.filter(user_id=user.pk, campus_id=campus.id).first()
         if not student:
             raise PermissionDenied("No student profile is linked to this login.")
         if feature == "study_assistant":
@@ -4697,6 +4736,16 @@ class RoleAIToolView(APIView):
     permission_classes = [RoleAccessPermission]
     read_roles = READ_ROLES
     write_roles = READ_ROLES
+
+    def get_throttles(self):
+        if self.request.method.upper() == "POST":
+            from rest_framework.throttling import ScopedRateThrottle
+            return [ScopedRateThrottle()]
+        return []
+
+    @property
+    def throttle_scope(self):
+        return "ai_generation" if self.request.method.upper() == "POST" else None
 
     @extend_schema(
         responses=inline_serializer(
@@ -4756,7 +4805,7 @@ class RoleAIToolView(APIView):
 
 
 class AILogViewSet(RoleScopedModelViewSet):
-    queryset = AILog.objects.select_related("campus", "user", "created_by")
+    queryset = AILog.objects
     serializer_class = AILogSerializer
     campus_filter_path = "campus_id"
     read_roles = READ_ROLES
@@ -4768,9 +4817,9 @@ class AILogViewSet(RoleScopedModelViewSet):
         user = self.request.user
         if user.role == UserRole.ACCOUNT:
             campus_ids = self.admin_campus_ids()
-            return queryset.filter(Q(campus_id__in=campus_ids) | Q(user=user)).distinct() if campus_ids else queryset.filter(user=user)
+            return queryset.filter(Q(campus_id__in=campus_ids) | Q(user_id=user.pk)).distinct() if campus_ids else queryset.filter(user_id=user.pk)
         if user.role in (UserRole.TEACHER, UserRole.STUDENT):
-            return queryset.filter(user=user)
+            return queryset.filter(user_id=user.pk)
         return queryset.none()
 
     def perform_create(self, serializer):
@@ -4780,7 +4829,7 @@ class AILogViewSet(RoleScopedModelViewSet):
 
 
 class DocumentViewSet(RoleScopedModelViewSet):
-    queryset = Document.objects.select_related("campus", "student", "staff_user", "uploaded_by", "created_by")
+    queryset = Document.objects
     serializer_class = DocumentSerializer
     campus_filter_path = "campus_id"
     read_roles = ACCOUNT_ROLES + (UserRole.TEACHER, UserRole.STUDENT)
@@ -4815,7 +4864,7 @@ class DocumentViewSet(RoleScopedModelViewSet):
         self.write_audit(AuditAction.UPDATE, instance)
 
     @action(detail=True, methods=["get"], url_path="download")
-    def download(self, request, pk=None):
+    def download(self, request, id=None):
         document = self.get_object()
         DocumentAccessLog.objects.create(
             campus=document.campus,
@@ -4842,7 +4891,7 @@ class DocumentViewSet(RoleScopedModelViewSet):
 
 
 class PlatformSettingViewSet(RoleScopedModelViewSet):
-    queryset = PlatformSetting.objects.select_related("campus", "created_by")
+    queryset = PlatformSetting.objects
     serializer_class = PlatformSettingSerializer
     campus_filter_path = "campus_id"
     read_roles = ACCOUNT_ROLES
@@ -4869,7 +4918,7 @@ class PlatformSettingViewSet(RoleScopedModelViewSet):
 
 
 class AdmissionFormTemplateViewSet(RoleScopedModelViewSet):
-    queryset = AdmissionFormTemplate.objects.select_related("campus", "created_by")
+    queryset = AdmissionFormTemplate.objects
     serializer_class = AdmissionFormTemplateSerializer
     campus_filter_path = "campus_id"
     read_roles = ADMIN_ROLES
@@ -4893,7 +4942,7 @@ class AdmissionFormTemplateViewSet(RoleScopedModelViewSet):
 
 
 class AdmissionApplicationViewSet(RoleScopedModelViewSet):
-    queryset = AdmissionApplication.objects.select_related("campus", "form_template", "target_section", "admitted_student", "reviewed_by", "created_by").prefetch_related("documents")
+    queryset = AdmissionApplication.objects
     serializer_class = AdmissionApplicationSerializer
     campus_filter_path = "campus_id"
     read_roles = ADMIN_ROLES
@@ -4918,7 +4967,7 @@ class AdmissionApplicationViewSet(RoleScopedModelViewSet):
         self.write_audit(AuditAction.CREATE, instance)
 
     @action(detail=True, methods=["post"], url_path="transition")
-    def transition(self, request, pk=None):
+    def transition(self, request, id=None):
         application = self.get_object()
         next_status = request.data.get("status")
         if next_status not in AdmissionApplicationStatus.values:
@@ -4937,7 +4986,7 @@ class AdmissionApplicationViewSet(RoleScopedModelViewSet):
         return Response(self.get_serializer(application).data, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=["post"], url_path="mark-payment")
-    def mark_payment(self, request, pk=None):
+    def mark_payment(self, request, id=None):
         application = self.get_object()
         payment_status = request.data.get("payment_status", TransactionStatus.SUCCESS)
         if payment_status not in TransactionStatus.values:
@@ -4949,11 +4998,11 @@ class AdmissionApplicationViewSet(RoleScopedModelViewSet):
         return Response(self.get_serializer(application).data, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=["post"], url_path="admit")
-    def admit(self, request, pk=None):
+    def admit(self, request, id=None):
         application = self.get_object()
         section = application.target_section
         if request.data.get("section"):
-            section = get_object_or_404(ClassSection, pk=request.data["section"], campus=application.campus)
+            section = get_object_or_404(ClassSection, id=request.data["section"], campus=application.campus)
         if not section:
             raise ValidationError({"section": "Select a class/section before admitting the student."})
         student = application.admitted_student
@@ -4975,7 +5024,7 @@ class AdmissionApplicationViewSet(RoleScopedModelViewSet):
         return Response(self.get_serializer(application).data, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=["post"], url_path="upload-document", parser_classes=[MultiPartParser, FormParser])
-    def upload_document(self, request, pk=None):
+    def upload_document(self, request, id=None):
         application = self.get_object()
         upload = request.FILES.get("file")
         if not upload:
@@ -5019,7 +5068,7 @@ class AdmissionApplicationViewSet(RoleScopedModelViewSet):
 
 
 class AdmissionDocumentViewSet(RoleScopedModelViewSet):
-    queryset = AdmissionDocument.objects.select_related("application", "application__campus", "uploaded_by")
+    queryset = AdmissionDocument.objects
     serializer_class = AdmissionDocumentSerializer
     campus_filter_path = "application__campus_id"
     read_roles = ADMIN_ROLES
@@ -5032,7 +5081,7 @@ class AdmissionDocumentViewSet(RoleScopedModelViewSet):
         return application.campus_id if application else None
 
     @action(detail=True, methods=["get"], url_path="download")
-    def download(self, request, pk=None):
+    def download(self, request, id=None):
         document = self.get_object()
         DocumentAccessLog.objects.create(
             campus=document.application.campus,
@@ -5076,12 +5125,12 @@ class PublicAdmissionView(APIView):
         campus = get_object_or_404(Campus, code__iexact=school_code, status=SchoolStatus.ACTIVE)
         form_template = None
         if request.data.get("form_template"):
-            form_template = get_object_or_404(AdmissionFormTemplate, pk=request.data["form_template"], campus=campus, is_public=True, status=RecordStatus.ACTIVE)
+            form_template = get_object_or_404(AdmissionFormTemplate, id=request.data["form_template"], campus=campus, is_public=True, status=RecordStatus.ACTIVE)
         else:
             form_template = AdmissionFormTemplate.objects.filter(campus=campus, is_public=True, status=RecordStatus.ACTIVE).first()
         section = None
         if request.data.get("target_section"):
-            section = get_object_or_404(ClassSection, pk=request.data["target_section"], campus=campus)
+            section = get_object_or_404(ClassSection, id=request.data["target_section"], campus=campus)
         application = AdmissionApplication.objects.create(
             campus=campus,
             form_template=form_template,
@@ -5115,12 +5164,12 @@ class PublicAdmissionTrackingView(APIView):
 
     @extend_schema(responses=AdmissionApplicationSerializer)
     def get(self, request, tracking_code):
-        application = get_object_or_404(AdmissionApplication.objects.select_related("campus", "form_template", "target_section"), tracking_code=tracking_code)
+        application = get_object_or_404(AdmissionApplication.objects, tracking_code=tracking_code)
         return Response(AdmissionApplicationSerializer(application, context={"request": request}).data, status=status.HTTP_200_OK)
 
 
 class TransportDriverViewSet(RoleScopedModelViewSet):
-    queryset = TransportDriver.objects.select_related("campus", "user", "created_by")
+    queryset = TransportDriver.objects
     serializer_class = TransportDriverSerializer
     campus_filter_path = "campus_id"
     read_roles = ADMIN_ROLES
@@ -5139,7 +5188,7 @@ class TransportDriverViewSet(RoleScopedModelViewSet):
 
 
 class TransportVehicleAttendanceViewSet(RoleScopedModelViewSet):
-    queryset = TransportVehicleAttendance.objects.select_related("campus", "vehicle", "driver", "marked_by")
+    queryset = TransportVehicleAttendance.objects
     serializer_class = TransportVehicleAttendanceSerializer
     campus_filter_path = "campus_id"
     read_roles = ADMIN_ROLES
@@ -5157,7 +5206,7 @@ class TransportVehicleAttendanceViewSet(RoleScopedModelViewSet):
 
 
 class TransportTripLogViewSet(RoleScopedModelViewSet):
-    queryset = TransportTripLog.objects.select_related("campus", "route", "vehicle", "driver", "created_by")
+    queryset = TransportTripLog.objects
     serializer_class = TransportTripLogSerializer
     campus_filter_path = "campus_id"
     read_roles = READ_ROLES
@@ -5180,7 +5229,7 @@ class TransportTripLogViewSet(RoleScopedModelViewSet):
 
 
 class DigitalLibraryResourceViewSet(RoleScopedModelViewSet):
-    queryset = DigitalLibraryResource.objects.select_related("campus", "book", "created_by")
+    queryset = DigitalLibraryResource.objects
     serializer_class = DigitalLibraryResourceSerializer
     campus_filter_path = "campus_id"
     read_roles = READ_ROLES
@@ -5198,7 +5247,7 @@ class DigitalLibraryResourceViewSet(RoleScopedModelViewSet):
         return queryset.filter(campus=school) if school else queryset.none()
 
     @action(detail=True, methods=["get"], url_path="download")
-    def download(self, request, pk=None):
+    def download(self, request, id=None):
         resource = self.get_object()
         DocumentAccessLog.objects.create(
             campus=resource.campus,
@@ -5213,7 +5262,7 @@ class DigitalLibraryResourceViewSet(RoleScopedModelViewSet):
 
 
 class LibraryBookRequestViewSet(RoleScopedModelViewSet):
-    queryset = LibraryBookRequest.objects.select_related("campus", "book", "student", "staff_user", "decided_by")
+    queryset = LibraryBookRequest.objects
     serializer_class = LibraryBookRequestSerializer
     campus_filter_path = "campus_id"
     read_roles = READ_ROLES
@@ -5245,7 +5294,7 @@ class LibraryBookRequestViewSet(RoleScopedModelViewSet):
         self.write_audit(AuditAction.CREATE, instance)
 
     @action(detail=True, methods=["post"], url_path="decide")
-    def decide(self, request, pk=None):
+    def decide(self, request, id=None):
         if request.user.role not in ADMIN_ROLES:
             raise PermissionDenied("Only admins can decide book requests.")
         item = self.get_object()
@@ -5261,7 +5310,7 @@ class LibraryBookRequestViewSet(RoleScopedModelViewSet):
 
 
 class InventoryAssetViewSet(RoleScopedModelViewSet):
-    queryset = InventoryAsset.objects.select_related("campus", "allocated_to_user", "allocated_to_student", "created_by")
+    queryset = InventoryAsset.objects
     serializer_class = InventoryAssetSerializer
     campus_filter_path = "campus_id"
     read_roles = ADMIN_ROLES
@@ -5280,7 +5329,7 @@ class InventoryAssetViewSet(RoleScopedModelViewSet):
 
 
 class AssetMaintenanceLogViewSet(RoleScopedModelViewSet):
-    queryset = AssetMaintenanceLog.objects.select_related("campus", "asset", "created_by")
+    queryset = AssetMaintenanceLog.objects
     serializer_class = AssetMaintenanceLogSerializer
     campus_filter_path = "campus_id"
     read_roles = ADMIN_ROLES
@@ -5299,7 +5348,7 @@ class AssetMaintenanceLogViewSet(RoleScopedModelViewSet):
 
 
 class SchoolWebsiteContentViewSet(RoleScopedModelViewSet):
-    queryset = SchoolWebsiteContent.objects.select_related("campus", "created_by")
+    queryset = SchoolWebsiteContent.objects
     serializer_class = SchoolWebsiteContentSerializer
     campus_filter_path = "campus_id"
     read_roles = ADMIN_ROLES
@@ -5334,6 +5383,9 @@ class PublicSchoolWebsiteView(APIView):
         queryset = SchoolWebsiteContent.objects.filter(campus=campus, is_published=True).order_by("sort_order", "-publish_at")
         content_type = request.query_params.get("content_type")
         if content_type:
+            from apps.core.input import validate_enum_value
+            from apps.core.mongo_models import WebsiteContentTypeEnum
+            content_type = validate_enum_value(content_type, WebsiteContentTypeEnum)
             queryset = queryset.filter(content_type=content_type)
         return Response(
             {
@@ -5345,7 +5397,7 @@ class PublicSchoolWebsiteView(APIView):
 
 
 class PushNotificationDeviceViewSet(RoleScopedModelViewSet):
-    queryset = PushNotificationDevice.objects.select_related("campus", "user")
+    queryset = PushNotificationDevice.objects
     serializer_class = PushNotificationDeviceSerializer
     campus_filter_path = "campus_id"
     read_roles = READ_ROLES
@@ -5355,7 +5407,7 @@ class PushNotificationDeviceViewSet(RoleScopedModelViewSet):
     def filter_queryset_by_role(self, queryset):
         user = self.request.user
         if user.role in (UserRole.TEACHER, UserRole.STUDENT):
-            return queryset.filter(user=user)
+            return queryset.filter(user_id=user.pk)
         school = primary_school_for_user(user)
         return queryset.filter(campus=school) if school else queryset.none()
 
@@ -5368,7 +5420,7 @@ class PushNotificationDeviceViewSet(RoleScopedModelViewSet):
         self.write_audit(AuditAction.CREATE, instance)
 
     @action(detail=True, methods=["post"], url_path="disable")
-    def disable(self, request, pk=None):
+    def disable(self, request, id=None):
         device = self.get_object()
         device.is_active = False
         device.save(update_fields=["is_active", "updated_at"])
@@ -5377,7 +5429,7 @@ class PushNotificationDeviceViewSet(RoleScopedModelViewSet):
 
 
 class PushNotificationLogViewSet(RoleScopedModelViewSet):
-    queryset = PushNotificationLog.objects.select_related("campus", "user", "student", "created_by")
+    queryset = PushNotificationLog.objects
     serializer_class = PushNotificationLogSerializer
     campus_filter_path = "campus_id"
     read_roles = READ_ROLES
@@ -5388,9 +5440,9 @@ class PushNotificationLogViewSet(RoleScopedModelViewSet):
     def filter_queryset_by_role(self, queryset):
         user = self.request.user
         if user.role == UserRole.STUDENT:
-            return queryset.filter(Q(user=user) | Q(student__user=user)).distinct()
+            return queryset.filter(Q(user_id=user.pk) | Q(student__user=user)).distinct()
         if user.role == UserRole.TEACHER:
-            return queryset.filter(Q(user=user) | Q(campus__sections__class_teacher=user)).distinct()
+            return queryset.filter(Q(user_id=user.pk) | Q(campus__sections__class_teacher=user)).distinct()
         school = primary_school_for_user(user)
         return queryset.filter(campus=school) if school else queryset.none()
 
@@ -5400,7 +5452,7 @@ class PushNotificationLogViewSet(RoleScopedModelViewSet):
         self.write_audit(AuditAction.CREATE, instance)
 
     @action(detail=True, methods=["post"], url_path="mark-sent")
-    def mark_sent(self, request, pk=None):
+    def mark_sent(self, request, id=None):
         item = self.get_object()
         item.status = PushNotificationStatus.SENT
         item.sent_at = timezone.now()
@@ -5429,7 +5481,7 @@ class MobileAppBootstrapView(APIView):
     )
     def get(self, request):
         campus = primary_school_for_user(request.user)
-        notifications = PushNotificationLog.objects.filter(Q(user=request.user) | Q(student__user=request.user)).order_by("-created_at")[:10]
+        notifications = PushNotificationLog.objects.filter(Q(user_id=request.user.pk) | Q(student__user=request.user)).order_by("-created_at")[:10]
         payload = {
             "user": {"id": request.user.id, "username": request.user.username, "role": request.user.role},
             "school": {"id": campus.id, "name": campus.name, "code": campus.code, "logo": campus.logo_url} if campus else None,
@@ -5455,7 +5507,7 @@ class MarketplacePluginViewSet(RoleScopedModelViewSet):
 
 
 class SchoolPluginConfigViewSet(RoleScopedModelViewSet):
-    queryset = SchoolPluginConfig.objects.select_related("campus", "plugin", "created_by")
+    queryset = SchoolPluginConfig.objects
     serializer_class = SchoolPluginConfigSerializer
     campus_filter_path = "campus_id"
     read_roles = ADMIN_ROLES
@@ -5473,7 +5525,7 @@ class SchoolPluginConfigViewSet(RoleScopedModelViewSet):
 
 
 class AccountingLedgerEntryViewSet(RoleScopedModelViewSet):
-    queryset = AccountingLedgerEntry.objects.select_related("campus", "created_by")
+    queryset = AccountingLedgerEntry.objects
     serializer_class = AccountingLedgerEntrySerializer
     campus_filter_path = "campus_id"
     read_roles = ACCOUNT_ROLES
@@ -5504,27 +5556,27 @@ class AccountingLedgerEntryViewSet(RoleScopedModelViewSet):
 
 def report_rows_for_definition(definition: ReportDefinition, campus: Campus | None) -> tuple[list[str], list[list[str]]]:
     if definition.report_type == ReportDefinitionType.ATTENDANCE:
-        queryset = AttendanceRecord.objects.select_related("student", "section")
+        queryset = AttendanceRecord.objects
         if campus:
             queryset = queryset.filter(student__campus=campus)
         headers = ["Student", "Class", "Date", "Status"]
         rows = [[row.student.full_name, f"{row.section.grade_name}-{row.section.section_name}", row.date, row.status] for row in queryset[:500]]
         return headers, rows
     if definition.report_type == ReportDefinitionType.FEES:
-        queryset = FeeAssignment.objects.select_related("student")
+        queryset = FeeAssignment.objects
         if campus:
             queryset = queryset.filter(student__campus=campus)
         headers = ["Student", "Fee", "Payable", "Due", "Status"]
         rows = [[row.student.full_name, row.title, row.payable_amount, row.due_date, row.status] for row in queryset[:500]]
         return headers, rows
     if definition.report_type == ReportDefinitionType.STAFF:
-        queryset = StaffProfile.objects.select_related("campus", "user")
+        queryset = StaffProfile.objects
         if campus:
             queryset = queryset.filter(campus=campus)
         headers = ["Staff", "Designation", "Department", "Status"]
         rows = [[row.user.get_full_name() or row.user.username, row.designation, row.department, row.status] for row in queryset[:500]]
         return headers, rows
-    queryset = Student.objects.select_related("campus", "section")
+    queryset = Student.objects
     if campus:
         queryset = queryset.filter(campus=campus)
     headers = ["Admission No", "Student", "Class", "Status"]
@@ -5533,7 +5585,7 @@ def report_rows_for_definition(definition: ReportDefinition, campus: Campus | No
 
 
 class ReportDefinitionViewSet(RoleScopedModelViewSet):
-    queryset = ReportDefinition.objects.select_related("campus", "created_by")
+    queryset = ReportDefinition.objects
     serializer_class = ReportDefinitionSerializer
     campus_filter_path = "campus_id"
     read_roles = READ_ROLES
@@ -5558,14 +5610,14 @@ class ReportDefinitionViewSet(RoleScopedModelViewSet):
         self.write_audit(AuditAction.CREATE, instance)
 
     @action(detail=True, methods=["get"], url_path="run")
-    def run(self, request, pk=None):
+    def run(self, request, id=None):
         definition = self.get_object()
         campus = definition.campus or primary_school_for_user(request.user)
         headers, rows = report_rows_for_definition(definition, campus)
         return Response({"headers": headers, "rows": rows, "count": len(rows)}, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=["get"], url_path="export")
-    def export(self, request, pk=None):
+    def export(self, request, id=None):
         definition = self.get_object()
         campus = definition.campus or primary_school_for_user(request.user)
         headers, rows = report_rows_for_definition(definition, campus)
@@ -5573,7 +5625,7 @@ class ReportDefinitionViewSet(RoleScopedModelViewSet):
 
 
 class SecurityPolicyViewSet(RoleScopedModelViewSet):
-    queryset = SecurityPolicy.objects.select_related("campus", "created_by")
+    queryset = SecurityPolicy.objects
     serializer_class = SecurityPolicySerializer
     campus_filter_path = "campus_id"
     read_roles = ADMIN_ROLES
@@ -5591,7 +5643,7 @@ class SecurityPolicyViewSet(RoleScopedModelViewSet):
 
 
 class DeviceLoginSessionViewSet(RoleScopedModelViewSet):
-    queryset = DeviceLoginSession.objects.select_related("campus", "user")
+    queryset = DeviceLoginSession.objects
     serializer_class = DeviceLoginSessionSerializer
     campus_filter_path = "campus_id"
     read_roles = ADMIN_ROLES
@@ -5604,7 +5656,7 @@ class DeviceLoginSessionViewSet(RoleScopedModelViewSet):
         return queryset.filter(campus=school) if school else queryset.none()
 
     @action(detail=True, methods=["post"], url_path="force-logout")
-    def force_logout(self, request, pk=None):
+    def force_logout(self, request, id=None):
         session = self.get_object()
         session.is_active = False
         session.forced_logout = True
@@ -5617,7 +5669,7 @@ class DeviceLoginSessionViewSet(RoleScopedModelViewSet):
 
 
 class SecurityEventViewSet(RoleScopedModelViewSet):
-    queryset = SecurityEvent.objects.select_related("campus", "user", "resolved_by")
+    queryset = SecurityEvent.objects
     serializer_class = SecurityEventSerializer
     campus_filter_path = "campus_id"
     read_roles = ADMIN_ROLES
@@ -5630,7 +5682,7 @@ class SecurityEventViewSet(RoleScopedModelViewSet):
         return queryset.filter(campus=school) if school else queryset.none()
 
     @action(detail=True, methods=["post"], url_path="resolve")
-    def resolve(self, request, pk=None):
+    def resolve(self, request, id=None):
         item = self.get_object()
         item.resolved_at = timezone.now()
         item.resolved_by = request.user
@@ -5653,7 +5705,7 @@ def build_production_audit_checks(campus: Campus | None = None) -> list[dict]:
 
 
 class ProductionAuditRunViewSet(RoleScopedModelViewSet):
-    queryset = ProductionAuditRun.objects.select_related("campus", "created_by")
+    queryset = ProductionAuditRun.objects
     serializer_class = ProductionAuditRunSerializer
     campus_filter_path = "campus_id"
     read_roles = ADMIN_ROLES
@@ -5668,7 +5720,7 @@ class ProductionAuditRunViewSet(RoleScopedModelViewSet):
     def run_now(self, request):
         campus = None
         if request.data.get("campus"):
-            campus = get_object_or_404(Campus, pk=request.data["campus"])
+            campus = get_object_or_404(Campus, id=request.data["campus"])
         checks = build_production_audit_checks(campus)
         failed = [check for check in checks if not check["passed"]]
         audit = ProductionAuditRun.objects.create(
@@ -5684,7 +5736,7 @@ class ProductionAuditRunViewSet(RoleScopedModelViewSet):
         return Response(self.get_serializer(audit).data, status=status.HTTP_201_CREATED)
 
     @action(detail=True, methods=["get"], url_path="report")
-    def report(self, request, pk=None):
+    def report(self, request, id=None):
         audit = self.get_object()
         lines = [f"{check['label']}: {'PASS' if check['passed'] else 'FAIL'} - {check['detail']}" for check in audit.checks]
         response = HttpResponse(simple_pdf_bytes("Production Audit Report", lines), content_type="application/pdf")
@@ -5715,7 +5767,7 @@ class Phase10EcosystemDashboardView(APIView):
     )
     def get(self, request):
         if request.user.role == UserRole.SUPER_ADMIN and request.query_params.get("campus"):
-            campus = get_object_or_404(Campus, pk=request.query_params.get("campus"))
+            campus = get_object_or_404(Campus, id=request.query_params.get("campus"))
         elif request.user.role == UserRole.SUPER_ADMIN:
             campus = None
         else:
@@ -5803,7 +5855,7 @@ class SaaSPlanViewSet(viewsets.ModelViewSet):
 
 
 class SchoolSubscriptionViewSet(RoleScopedModelViewSet):
-    queryset = SchoolSubscription.objects.select_related("campus", "plan", "created_by")
+    queryset = SchoolSubscription.objects
     serializer_class = SchoolSubscriptionSerializer
     campus_filter_path = "campus_id"
     read_roles = ADMIN_ROLES
@@ -5826,7 +5878,7 @@ class SchoolSubscriptionViewSet(RoleScopedModelViewSet):
         self.write_audit(AuditAction.UPDATE, instance)
 
     @action(detail=True, methods=["post"], url_path="renew")
-    def renew(self, request, pk=None):
+    def renew(self, request, id=None):
         subscription = self.get_object()
         months = int(request.data.get("months") or (12 if subscription.billing_cycle == BillingCycle.ANNUAL else 1))
         if months <= 0 or months > 36:
@@ -5842,7 +5894,7 @@ class SchoolSubscriptionViewSet(RoleScopedModelViewSet):
         return Response(self.get_serializer(subscription).data, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=["post"], url_path="generate-invoice")
-    def generate_invoice(self, request, pk=None):
+    def generate_invoice(self, request, id=None):
         subscription = self.get_object()
         invoice = SubscriptionInvoice.objects.create(
             subscription=subscription,
@@ -5869,7 +5921,7 @@ class SchoolSubscriptionViewSet(RoleScopedModelViewSet):
 
 
 class SubscriptionInvoiceViewSet(RoleScopedModelViewSet):
-    queryset = SubscriptionInvoice.objects.select_related("subscription", "subscription__plan", "campus", "created_by")
+    queryset = SubscriptionInvoice.objects
     serializer_class = SubscriptionInvoiceSerializer
     campus_filter_path = "campus_id"
     read_roles = ADMIN_ROLES
@@ -5888,7 +5940,7 @@ class SubscriptionInvoiceViewSet(RoleScopedModelViewSet):
         self.write_audit(AuditAction.CREATE, instance)
 
     @action(detail=True, methods=["get"], url_path="pdf")
-    def pdf(self, request, pk=None):
+    def pdf(self, request, id=None):
         invoice = self.get_object()
         lines = [
             f"GST Invoice: {invoice.invoice_number}",
@@ -5910,7 +5962,7 @@ class SubscriptionInvoiceViewSet(RoleScopedModelViewSet):
 
 
 class SubscriptionPaymentViewSet(RoleScopedModelViewSet):
-    queryset = SubscriptionPayment.objects.select_related("invoice", "campus", "created_by")
+    queryset = SubscriptionPayment.objects
     serializer_class = SubscriptionPaymentSerializer
     campus_filter_path = "campus_id"
     read_roles = ADMIN_ROLES
@@ -5938,7 +5990,7 @@ class SubscriptionPaymentViewSet(RoleScopedModelViewSet):
 
 
 class WhiteLabelConfigViewSet(RoleScopedModelViewSet):
-    queryset = WhiteLabelConfig.objects.select_related("campus", "created_by")
+    queryset = WhiteLabelConfig.objects
     serializer_class = WhiteLabelConfigSerializer
     campus_filter_path = "campus_id"
     read_roles = ADMIN_ROLES
@@ -5962,7 +6014,7 @@ class WhiteLabelConfigViewSet(RoleScopedModelViewSet):
 
 
 class UserActivityLogViewSet(RoleScopedModelViewSet):
-    queryset = UserActivityLog.objects.select_related("campus", "user")
+    queryset = UserActivityLog.objects
     serializer_class = UserActivityLogSerializer
     campus_filter_path = "campus_id"
     read_roles = ADMIN_ROLES
@@ -5976,14 +6028,14 @@ class UserActivityLogViewSet(RoleScopedModelViewSet):
 
 
 class DocumentAccessLogViewSet(UserActivityLogViewSet):
-    queryset = DocumentAccessLog.objects.select_related("campus", "document", "user", "student")
+    queryset = DocumentAccessLog.objects
     serializer_class = DocumentAccessLogSerializer
     filterset_fields = ("campus", "document", "user", "student", "access_type", "granted")
     search_fields = ("file_name", "reason", "ip_address")
 
 
 class EnterpriseUsageMetricViewSet(RoleScopedModelViewSet):
-    queryset = EnterpriseUsageMetric.objects.select_related("campus")
+    queryset = EnterpriseUsageMetric.objects
     serializer_class = EnterpriseUsageMetricSerializer
     campus_filter_path = "campus_id"
     read_roles = ADMIN_ROLES
@@ -5997,7 +6049,7 @@ class EnterpriseUsageMetricViewSet(RoleScopedModelViewSet):
 
 
 class BackupPolicyViewSet(EnterpriseUsageMetricViewSet):
-    queryset = BackupPolicy.objects.select_related("campus", "created_by")
+    queryset = BackupPolicy.objects
     serializer_class = BackupPolicySerializer
     write_roles = (UserRole.SUPER_ADMIN,)
     filterset_fields = ("campus", "backup_type", "frequency", "is_active")
@@ -6008,7 +6060,7 @@ class BackupPolicyViewSet(EnterpriseUsageMetricViewSet):
 
 
 class BackupJobViewSet(EnterpriseUsageMetricViewSet):
-    queryset = BackupJob.objects.select_related("policy", "campus", "created_by")
+    queryset = BackupJob.objects
     serializer_class = BackupJobSerializer
     write_roles = (UserRole.SUPER_ADMIN,)
     filterset_fields = ("campus", "backup_type", "status")
@@ -6018,7 +6070,7 @@ class BackupJobViewSet(EnterpriseUsageMetricViewSet):
         self.write_audit(AuditAction.CREATE, instance)
 
     @action(detail=True, methods=["post"], url_path="mark-restored")
-    def mark_restored(self, request, pk=None):
+    def mark_restored(self, request, id=None):
         job = self.get_object()
         job.metadata = {**(job.metadata or {}), "restoreTestedAt": timezone.now().isoformat(), "restoreNote": request.data.get("note", "")}
         job.save(update_fields=["metadata", "updated_at"])
@@ -6027,7 +6079,7 @@ class BackupJobViewSet(EnterpriseUsageMetricViewSet):
 
 
 class QueueJobViewSet(EnterpriseUsageMetricViewSet):
-    queryset = QueueJob.objects.select_related("campus", "created_by")
+    queryset = QueueJob.objects
     serializer_class = QueueJobSerializer
     write_roles = (UserRole.SUPER_ADMIN,)
     filterset_fields = ("campus", "job_type", "status")
@@ -6052,14 +6104,14 @@ class QueueJobViewSet(EnterpriseUsageMetricViewSet):
 
 
 class SystemHealthSnapshotViewSet(EnterpriseUsageMetricViewSet):
-    queryset = SystemHealthSnapshot.objects.select_related("campus")
+    queryset = SystemHealthSnapshot.objects
     serializer_class = SystemHealthSnapshotSerializer
     write_roles = (UserRole.SUPER_ADMIN,)
     filterset_fields = ("campus", "component", "status")
 
 
 class SecureAPITokenViewSet(EnterpriseUsageMetricViewSet):
-    queryset = SecureAPIToken.objects.select_related("campus", "created_by")
+    queryset = SecureAPIToken.objects
     serializer_class = SecureAPITokenSerializer
     write_roles = (UserRole.SUPER_ADMIN,)
     filterset_fields = ("campus", "is_active", "prefix")
@@ -6079,7 +6131,7 @@ class SecureAPITokenViewSet(EnterpriseUsageMetricViewSet):
 
 
 class AuditEventViewSet(viewsets.ReadOnlyModelViewSet):
-    queryset = AuditEvent.objects.select_related("actor")
+    queryset = AuditEvent.objects
     serializer_class = AuditEventSerializer
     permission_classes = [RoleAccessPermission]
     read_roles = ADMIN_ROLES
@@ -6094,7 +6146,7 @@ class AuditEventViewSet(viewsets.ReadOnlyModelViewSet):
         if getattr(user, "role", None) != UserRole.SCHOOL_ADMIN:
             return queryset.none()
 
-        campus_scope = CampusMembership.objects.filter(user=user).select_related("campus")
+        campus_scope = CampusMembership.objects.filter(user_id=user.pk)
         campus_ids = list(campus_scope.values_list("campus_id", flat=True).distinct())
         campus_codes = list(campus_scope.values_list("campus__code", flat=True).distinct())
         if not campus_ids:
@@ -6120,7 +6172,7 @@ class EnterpriseAnalyticsView(APIView):
 
         today = timezone.localdate()
         month_start = today.replace(day=1)
-        active_subscriptions = SchoolSubscription.objects.filter(status__in=[SubscriptionStatus.TRIAL, SubscriptionStatus.ACTIVE, SubscriptionStatus.GRACE]).select_related("plan", "campus")
+        active_subscriptions = SchoolSubscription.objects.filter(status__in=[SubscriptionStatus.TRIAL, SubscriptionStatus.ACTIVE, SubscriptionStatus.GRACE])
         mrr = Decimal("0")
         for subscription in active_subscriptions:
             amount = subscription.effective_price
@@ -6174,7 +6226,7 @@ class SchoolEnterpriseAnalyticsView(APIView):
     @extend_schema(responses=OpenApiTypes.OBJECT)
     def get(self, request):
         if request.user.role == UserRole.SUPER_ADMIN and request.query_params.get("campus"):
-            campus = get_object_or_404(Campus, pk=request.query_params.get("campus"))
+            campus = get_object_or_404(Campus, id=request.query_params.get("campus"))
         else:
             campus = primary_school_for_user(request.user)
         if not campus:
@@ -6237,7 +6289,7 @@ class EnterpriseMonitoringView(APIView):
     @extend_schema(responses=OpenApiTypes.OBJECT)
     def get(self, request):
         if request.user.role == UserRole.SUPER_ADMIN and request.query_params.get("campus"):
-            campus = get_object_or_404(Campus, pk=request.query_params.get("campus"))
+            campus = get_object_or_404(Campus, id=request.query_params.get("campus"))
         elif request.user.role == UserRole.SUPER_ADMIN:
             campus = None
         else:
@@ -6280,11 +6332,11 @@ class DashboardSummaryView(APIView):
         if user.role in (UserRole.SCHOOL_ADMIN, UserRole.ACCOUNT):
             if getattr(user, "school_id", None):
                 return [user.school_id]
-            return list(CampusMembership.objects.filter(user=user).values_list("campus_id", flat=True).distinct())
+            return list(CampusMembership.objects.filter(user_id=user.pk).values_list("campus_id", flat=True).distinct())
         return []
 
     def scoped_students(self, user):
-        queryset = Student.objects.select_related("campus", "section")
+        queryset = Student.objects
         if user.role == UserRole.SUPER_ADMIN:
             return queryset
         if user.role in (UserRole.SCHOOL_ADMIN, UserRole.ACCOUNT):
@@ -6296,7 +6348,7 @@ class DashboardSummaryView(APIView):
                 | Q(section__subject_allocations__teacher=user, section__subject_allocations__is_active=True)
             ).distinct()
         if user.role == UserRole.STUDENT:
-            return queryset.filter(user=user)
+            return queryset.filter(user_id=user.pk)
         return queryset.none()
 
     def scoped_campus_ids(self, user, students):
@@ -6339,10 +6391,10 @@ class DashboardSummaryView(APIView):
         notice_scope = Q(campus_id__in=campus_ids)
         if user.role == UserRole.SUPER_ADMIN:
             notice_scope |= Q(campus__isnull=True)
-        recent_notices_queryset = Announcement.objects.filter(notice_scope, is_active=True).select_related("campus").order_by("-publish_on", "-created_at")[:6]
+        recent_notices_queryset = Announcement.objects.filter(notice_scope, is_active=True).order_by("-publish_on", "-created_at")[:6]
         upcoming_exam_queryset = (
             ExamSchedule.objects.filter(campus_id__in=campus_ids, exam_date__gte=today)
-            .select_related("exam_type", "section", "subject")
+            
             .order_by("exam_date", "start_time")[:6]
         )
 
@@ -6405,7 +6457,7 @@ class DashboardSummaryView(APIView):
                 "payment_method": payment.payment_method,
                 "reference_number": payment.reference_number,
             }
-            for payment in payments.select_related("fee_assignment", "fee_assignment__student").order_by("-paid_on", "-created_at")[:8]
+            for payment in payments.order_by("-paid_on", "-created_at")[:8]
         ]
         recent_transactions = [
             {
@@ -6419,7 +6471,7 @@ class DashboardSummaryView(APIView):
                 "transaction_id": transaction_obj.gateway_payment_id or transaction_obj.transaction_id,
                 "created_at": transaction_obj.created_at,
             }
-            for transaction_obj in payment_transactions.select_related("student", "fee_assignment").order_by("-created_at")[:8]
+            for transaction_obj in payment_transactions.order_by("-created_at")[:8]
         ]
 
         return Response(

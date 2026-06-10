@@ -6,8 +6,12 @@ from .views import (
     CaptchaChallengeView,
     CurrentUserView,
     ERPTokenObtainPairView,
+    EmailVerificationConfirmView,
+    EmailVerificationSendView,
     LogoutView,
     PasswordChangeView,
+    PasswordResetConfirmView,
+    PasswordResetRequestView,
     UserViewSet,
 )
 
@@ -21,5 +25,9 @@ urlpatterns = [
     path("logout/", LogoutView.as_view(), name="logout"),
     path("me/", CurrentUserView.as_view(), name="current-user"),
     path("change-password/", PasswordChangeView.as_view(), name="change-password"),
+    path("password-reset/request/", PasswordResetRequestView.as_view(), name="password-reset-request"),
+    path("password-reset/confirm/", PasswordResetConfirmView.as_view(), name="password-reset-confirm"),
+    path("email-verification/send/", EmailVerificationSendView.as_view(), name="email-verification-send"),
+    path("email-verification/confirm/", EmailVerificationConfirmView.as_view(), name="email-verification-confirm"),
     path("", include(router.urls)),
 ]

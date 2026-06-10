@@ -12,10 +12,10 @@ jobs:
     env:
       DJANGO_SETTINGS_MODULE: config.settings.local
       DJANGO_USE_SQLITE: "True"
-      DJANGO_SECRET_KEY: ci-test-secret-key-that-is-long-enough
+      DJANGO_SECRET_KEY: ${{ secrets.DJANGO_SECRET_KEY }}
       DJANGO_DEBUG: "False"
-      NEXT_PUBLIC_SITE_URL: https://mentriq-erp.vercel.app
-      NEXT_PUBLIC_API_BASE_URL: https://backend-nu-self-91.vercel.app/api/v1
+      NEXT_PUBLIC_SITE_URL: ${{ vars.NEXT_PUBLIC_SITE_URL || 'http://localhost:3000' }}
+      NEXT_PUBLIC_API_BASE_URL: ${{ secrets.NEXT_PUBLIC_API_BASE_URL || vars.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8000/api/v1' }}
     steps:
       - uses: actions/checkout@v4
 

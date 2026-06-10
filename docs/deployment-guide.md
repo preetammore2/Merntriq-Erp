@@ -70,8 +70,9 @@ python manage.py migrate --noinput
 For separate school databases:
 
 ```dotenv
-CAMPUS_DATABASE_URLS=DEMO360=postgres://user:pass@host:5432/mentriq360_demo;NORTH=postgres://user:pass@host:5432/mentriq360_north
+CAMPUS_DATABASE_URLS=DEMO360=postgres://<user>:<pass>@<host>:5432/mentriq360_demo;NORTH=postgres://<user>:<pass>@<host>:5432/mentriq360_north
 ```
+
 
 Then run:
 

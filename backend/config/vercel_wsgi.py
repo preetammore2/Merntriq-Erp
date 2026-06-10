@@ -9,13 +9,6 @@ django.setup()
 
 
 def _bootstrap_sqlite_if_needed() -> None:
-    """
-    On a fresh Vercel container /tmp is empty. When the backend is configured
-    to use SQLite at /tmp/mentriq360.db we run migrations so the first real
-    request is not hit with 'no such table' errors.  The post_migrate signal
-    on apps.accounts then seeds the permanent super-admin automatically.
-    This function is a no-op when an external DATABASE_URL is configured.
-    """
     from django.conf import settings
 
     db_cfg = settings.DATABASES.get("default", {})

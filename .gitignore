@@ -4,6 +4,9 @@ Thumbs.db
 .env
 .env.*
 !.env.example
+*.pem
+*.key
+secrets*
 
 .backend-venv/
 .backend-venv-win/

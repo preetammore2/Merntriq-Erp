@@ -8,14 +8,23 @@ from rest_framework.views import APIView
 from rest_framework_simplejwt.exceptions import TokenError
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.views import TokenObtainPairView
-from django.db.models import Q
+from apps.core.mongo_compat import Q
 
 from apps.core.models import AuditAction, AuditEvent, UserActivityLog
 from apps.core.permissions import RoleAccessPermission
 
 from .captcha import generate_captcha_challenge
 from .models import User, UserRole
-from .serializers import ERPTokenObtainPairSerializer, PasswordChangeSerializer, UserAdminSerializer, UserSerializer
+from .serializers import (
+    ERPTokenObtainPairSerializer,
+    PasswordChangeSerializer,
+    PasswordResetRequestSerializer,
+    PasswordResetConfirmSerializer,
+    EmailVerificationSendSerializer,
+    EmailVerificationConfirmSerializer,
+    UserAdminSerializer,
+    UserSerializer,
+)
 
 ADMIN_ROLES = (UserRole.SUPER_ADMIN, UserRole.SCHOOL_ADMIN)
 
@@ -148,6 +157,7 @@ class CurrentUserView(APIView):
 
 class PasswordChangeView(APIView):
     permission_classes = [IsAuthenticated]
+    throttle_scope = "change_password"
 
     @extend_schema(request=PasswordChangeSerializer, responses=UserSerializer)
     def post(self, request):
@@ -165,6 +175,55 @@ class PasswordChangeView(APIView):
         return Response(UserSerializer(request.user).data)
 
 
+class PasswordResetRequestView(APIView):
+    authentication_classes = []
+    permission_classes = [AllowAny]
+    throttle_scope = "password_reset"
+
+    @extend_schema(request=PasswordResetRequestSerializer, responses=PasswordResetRequestSerializer)
+    def post(self, request):
+        serializer = PasswordResetRequestSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        result = serializer.save()
+        return Response(result)
+
+
+class PasswordResetConfirmView(APIView):
+    authentication_classes = []
+    permission_classes = [AllowAny]
+    throttle_scope = "password_reset"
+
+    @extend_schema(request=PasswordResetConfirmSerializer, responses=PasswordResetConfirmSerializer)
+    def post(self, request):
+        serializer = PasswordResetConfirmSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response({"detail": "Password has been reset successfully."})
+
+
+class EmailVerificationSendView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(responses=EmailVerificationSendSerializer)
+    def post(self, request):
+        serializer = EmailVerificationSendSerializer(data={}, context={"request": request})
+        serializer.is_valid(raise_exception=True)
+        result = serializer.save()
+        return Response(result)
+
+
+class EmailVerificationConfirmView(APIView):
+    authentication_classes = []
+    permission_classes = [AllowAny]
+
+    @extend_schema(request=EmailVerificationConfirmSerializer, responses=EmailVerificationConfirmSerializer)
+    def post(self, request):
+        serializer = EmailVerificationConfirmSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response({"detail": "Email verified successfully."})
+
+
 class UserViewSet(viewsets.ModelViewSet):
     queryset = User.objects.all()
     serializer_class = UserAdminSerializer
@@ -173,6 +232,14 @@ class UserViewSet(viewsets.ModelViewSet):
     write_roles = ADMIN_ROLES
     filterset_fields = ("role", "is_active")
     search_fields = ("username", "first_name", "last_name", "email", "phone_number", "city", "state")
+    throttle_scope = "user_creation"
+
+    def get_throttles(self):
+        throttles = super().get_throttles()
+        if self.action == "create":
+            from rest_framework.throttling import ScopedRateThrottle
+            throttles.append(ScopedRateThrottle())
+        return throttles
 
     def get_queryset(self):
         queryset = super().get_queryset()
@@ -180,24 +247,32 @@ class UserViewSet(viewsets.ModelViewSet):
             from apps.core.models import CampusMembership
 
             campus_ids = [self.request.user.school_id] if self.request.user.school_id else list(
-                CampusMembership.objects.filter(user=self.request.user).values_list("campus_id", flat=True)
+                CampusMembership.objects.filter(user_id=self.request.user.pk).values_list("campus_id", flat=True)
             )
-            return (
-                queryset.exclude(role=UserRole.SUPER_ADMIN)
-                .filter(Q(campus_memberships__campus_id__in=campus_ids) | Q(school_id__in=campus_ids))
-                .distinct()
+            member_user_ids = list(
+                CampusMembership.objects.filter(campus_id__in=campus_ids).values_list("user_id", flat=True)
             )
+            user_ids = set(member_user_ids) | {self.request.user.pk}
+            return queryset.exclude(role=UserRole.SUPER_ADMIN).filter(pk__in=list(user_ids))
         return queryset
 
     def perform_destroy(self, instance):
+        user = self.request.user
         if instance.is_protected_super_admin:
             raise PermissionDenied("Super Admin accounts cannot be deleted.")
+        if user.role == UserRole.SCHOOL_ADMIN and instance.role == UserRole.SCHOOL_ADMIN:
+            raise PermissionDenied("School Admin accounts cannot be deleted by another School Admin.")
+        if instance.pk == user.pk:
+            raise PermissionDenied("You cannot delete your own account.")
         instance.delete()
 
     def perform_update(self, serializer):
         instance = self.get_object()
-        if instance.is_protected_super_admin and self.request.user.pk != instance.pk:
+        user = self.request.user
+        if instance.is_protected_super_admin and user.pk != instance.pk:
             raise PermissionDenied("Super Admin accounts cannot be modified by another user.")
+        if user.role == UserRole.SCHOOL_ADMIN and instance.role == UserRole.SCHOOL_ADMIN and user.pk != instance.pk:
+            raise PermissionDenied("School Admin accounts cannot be modified by another School Admin.")
         serializer.save()
 
     @action(detail=True, methods=["get"], url_path="detail")
@@ -205,7 +280,7 @@ class UserViewSet(viewsets.ModelViewSet):
         user = self.get_object()
         user_data = self.get_serializer(user).data
 
-        recent_events = AuditEvent.objects.filter(actor=user)[:50]
+        recent_events = AuditEvent.objects.filter(actor_id=user.pk)[:50]
         audit_events = [
             {
                 "id": event.id,
@@ -221,3 +296,4 @@ class UserViewSet(viewsets.ModelViewSet):
 
         user_data["audit_events"] = audit_events
         return Response(user_data)
+

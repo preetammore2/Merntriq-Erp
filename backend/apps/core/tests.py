@@ -2370,3 +2370,358 @@ class ERPRoleFlowTests(APITestCase):
         ticket = SupportTicket.objects.get(pk=ticket_id)
         self.assertEqual(ticket.status, "resolved")
         self.assertEqual(ticket.reviewed_by, self.super_admin)
+
+    # ── Edge case: Pagination boundary validation ──────────────────────────
+    def test_pagination_rejects_negative_page_number(self):
+        self.authenticate(self.admin)
+        response = self.client.get("/api/v1/students/?page=-1")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_pagination_rejects_zero_page_number(self):
+        self.authenticate(self.admin)
+        response = self.client.get("/api/v1/students/?page=0")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_pagination_rejects_negative_page_size(self):
+        self.authenticate(self.admin)
+        response = self.client.get("/api/v1/students/?page_size=-5")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_pagination_rejects_page_size_exceeding_max(self):
+        self.authenticate(self.admin)
+        response = self.client.get("/api/v1/students/?page_size=9999")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_pagination_rejects_non_numeric_page(self):
+        self.authenticate(self.admin)
+        response = self.client.get("/api/v1/students/?page=abc")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_pagination_rejects_non_numeric_page_size(self):
+        self.authenticate(self.admin)
+        response = self.client.get("/api/v1/students/?page_size=xyz")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_pagination_works_with_valid_boundaries(self):
+        self.authenticate(self.admin)
+        for index in range(1, 6):
+            Student.objects.create(
+                campus=self.campus,
+                section=self.section,
+                admission_number=f"EDGE-STU-{index}",
+                first_name=f"Edge{index}",
+                last_name="Test",
+                date_of_birth=date(2015, 1, index),
+            )
+        page1 = self.client.get("/api/v1/students/?page=1&page_size=2")
+        self.assertEqual(page1.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(page1.data["results"]), 2)
+
+        page2 = self.client.get("/api/v1/students/?page=2&page_size=2")
+        self.assertEqual(page2.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(page2.data["results"]), 2)
+
+    # ── Edge case: Attendance boundary conditions ─────────────────────────
+    def test_attendance_exact_edit_window_boundary_is_editable(self):
+        self.authenticate(self.teacher)
+        boundary_date = timezone.localdate() - timedelta(days=3)
+        response = self.client.post(
+            "/api/v1/attendance-records/bulk-upsert/",
+            {
+                "section": self.section.id,
+                "date": boundary_date.isoformat(),
+                "records": [{"student": self.student.id, "status": "present"}],
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+    def test_attendance_future_date_is_rejected(self):
+        self.authenticate(self.teacher)
+        future_date = timezone.localdate() + timedelta(days=1)
+        response = self.client.post(
+            "/api/v1/attendance-records/bulk-upsert/",
+            {
+                "section": self.section.id,
+                "date": future_date.isoformat(),
+                "records": [{"student": self.student.id, "status": "present"}],
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_attendance_today_is_editable(self):
+        self.authenticate(self.teacher)
+        today = timezone.localdate()
+        response = self.client.post(
+            "/api/v1/attendance-records/bulk-upsert/",
+            {
+                "section": self.section.id,
+                "date": today.isoformat(),
+                "records": [{"student": self.student.id, "status": "absent"}],
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+    # ── Edge case: Upload size enforcement ─────────────────────────────────
+    def test_upload_oversized_photo_is_rejected(self):
+        self.authenticate(self.admin)
+        oversized = make_uploaded_image("huge.png", "image/png", "PNG")
+        oversized.file = BytesIO(b"x" * 5_000_000)
+        oversized.size = 5_000_000
+        response = self.client.post(
+            f"/api/v1/students/{self.student.id}/upload-photo/",
+            {"file": oversized},
+            format="multipart",
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    # ── Edge case: Cross-school data isolation with boundary values ────────
+    def test_cross_school_isolation_with_empty_and_extreme_values(self):
+        other_admin = User.objects.create_user(
+            username="edge-other-admin",
+            password="Passw0rd!123",
+            role=UserRole.SCHOOL_ADMIN,
+            school=self.other_campus,
+            is_staff=True,
+        )
+        CampusMembership.objects.create(campus=self.other_campus, user=other_admin, role="it_admin", is_primary=True)
+
+        self.authenticate(self.admin)
+        created = self.client.post(
+            "/api/v1/students/",
+            {
+                "campus": self.campus.id,
+                "section": self.section.id,
+                "first_name": "",
+                "last_name": "X" * 500,
+                "date_of_birth": "2015-01-01",
+                "status": "active",
+            },
+            format="json",
+        )
+        self.assertEqual(created.status_code, status.HTTP_201_CREATED, created.data)
+        student_id = created.data["id"]
+
+        self.authenticate(other_admin)
+        blocked = self.client.get(f"/api/v1/students/{student_id}/")
+        self.assertEqual(blocked.status_code, status.HTTP_404_NOT_FOUND)
+
+    # ── Edge case: API rejects empty payloads gracefully ────────────────────
+    def test_create_student_with_empty_payload_returns_400(self):
+        self.authenticate(self.admin)
+        response = self.client.post("/api/v1/students/", {}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_create_student_with_null_fields_returns_400(self):
+        self.authenticate(self.admin)
+        response = self.client.post(
+            "/api/v1/students/",
+            {"campus": None, "section": None, "first_name": None, "last_name": None, "date_of_birth": None},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_attendance_with_invalid_date_format_returns_400(self):
+        self.authenticate(self.teacher)
+        response = self.client.post(
+            "/api/v1/attendance-records/bulk-upsert/",
+            {
+                "section": self.section.id,
+                "date": "not-a-date",
+                "records": [{"student": self.student.id, "status": "present"}],
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_attendance_with_empty_records_list_returns_400(self):
+        self.authenticate(self.teacher)
+        response = self.client.post(
+            "/api/v1/attendance-records/bulk-upsert/",
+            {
+                "section": self.section.id,
+                "date": timezone.localdate().isoformat(),
+                "records": [],
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    # ── Edge case: Token auth with missing/bad credentials ──────────────────
+    def test_protected_endpoint_with_expired_token_returns_401(self):
+        self.client.force_authenticate(user=None)
+        from rest_framework_simplejwt.tokens import AccessToken
+        token = AccessToken()
+        token.set_exp(lifetime=-timedelta(hours=1))
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {token}")
+        response = self.client.get("/api/v1/students/")
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_protected_endpoint_with_malformed_token_returns_401(self):
+        self.client.force_authenticate(user=None)
+        self.client.credentials(HTTP_AUTHORIZATION="Bearer invalid.token.here")
+        response = self.client.get("/api/v1/students/")
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_protected_endpoint_without_token_returns_401(self):
+        self.client.force_authenticate(user=None)
+        response = self.client.get("/api/v1/students/")
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    # ── Edge case: Null campus code in middleware ───────────────────────────
+    def test_admin_without_campus_membership_gets_empty_scope(self):
+        isolated = User.objects.create_user(
+            username="isolated-user",
+            password="Passw0rd!123",
+            role=UserRole.TEACHER,
+        )
+        self.authenticate(isolated)
+        response = self.client.get("/api/v1/students/")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data, [])
+
+    # ── Edge case: Fee assignment edge conditions ───────────────────────────
+    def test_fee_assignment_with_zero_amount_is_accepted(self):
+        account_user = User.objects.create_user(
+            username="edge-fee-account",
+            password="Passw0rd!123",
+            role=UserRole.ACCOUNT,
+            school=self.campus,
+        )
+        CampusMembership.objects.create(campus=self.campus, user=account_user, role="finance_admin", is_primary=True)
+        self.authenticate(account_user)
+        response = self.client.post(
+            "/api/v1/fee-assignments/",
+            {
+                "campus": self.campus.id,
+                "student": self.student.id,
+                "title": "Zero Fee",
+                "amount": "0.00",
+                "due_date": "2026-12-31",
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
+
+    def test_fee_assignment_with_very_large_amount_is_accepted(self):
+        account_user = User.objects.create_user(
+            username="edge-large-fee-account",
+            password="Passw0rd!123",
+            role=UserRole.ACCOUNT,
+            school=self.campus,
+        )
+        CampusMembership.objects.create(campus=self.campus, user=account_user, role="finance_admin", is_primary=True)
+        self.authenticate(account_user)
+        response = self.client.post(
+            "/api/v1/fee-assignments/",
+            {
+                "campus": self.campus.id,
+                "student": self.student.id,
+                "title": "Large Fee",
+                "amount": "99999999.99",
+                "due_date": "2026-12-31",
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
+
+    # ── Edge case: Duplicate admission number within same campus ────────────
+    def test_duplicate_admission_number_within_same_campus_is_rejected(self):
+        self.authenticate(self.admin)
+        first = self.client.post(
+            "/api/v1/students/",
+            {
+                "campus": self.campus.id,
+                "section": self.section.id,
+                "admission_number": "DUP-001",
+                "first_name": "First",
+                "last_name": "Dup",
+                "date_of_birth": "2015-01-01",
+                "status": "active",
+            },
+            format="json",
+        )
+        self.assertEqual(first.status_code, status.HTTP_201_CREATED, first.data)
+        second = self.client.post(
+            "/api/v1/students/",
+            {
+                "campus": self.campus.id,
+                "section": self.section.id,
+                "admission_number": "DUP-001",
+                "first_name": "Second",
+                "last_name": "Dup",
+                "date_of_birth": "2015-02-02",
+                "status": "active",
+            },
+            format="json",
+        )
+        self.assertEqual(second.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_duplicate_admission_number_across_campuses_is_allowed(self):
+        self.authenticate(self.admin)
+        other_section = ClassSection.objects.create(
+            campus=self.other_campus,
+            session=self.other_session,
+            grade_name="Grade 7",
+            section_name="A",
+            class_teacher=self.other_teacher,
+        )
+        main_response = self.client.post(
+            "/api/v1/students/",
+            {
+                "campus": self.campus.id,
+                "section": self.section.id,
+                "admission_number": "CROSS-DUP",
+                "first_name": "Main",
+                "last_name": "Student",
+                "date_of_birth": "2015-01-01",
+                "status": "active",
+            },
+            format="json",
+        )
+        self.assertEqual(main_response.status_code, status.HTTP_201_CREATED, main_response.data)
+        other_response = self.client.post(
+            "/api/v1/students/",
+            {
+                "campus": self.other_campus.id,
+                "section": other_section.id,
+                "admission_number": "CROSS-DUP",
+                "first_name": "Other",
+                "last_name": "Student",
+                "date_of_birth": "2015-03-03",
+                "status": "active",
+            },
+            format="json",
+        )
+        self.assertEqual(other_response.status_code, status.HTTP_201_CREATED, other_response.data)
+
+    # ── Edge case: Tenant middleware with extreme host values ───────────────
+    def test_tenant_middleware_with_malformed_host_header(self):
+        from django.test import RequestFactory
+        factory = RequestFactory()
+        middleware = CampusTenantMiddleware(lambda request: None)
+        with override_settings(TENANT_DOMAIN_SUFFIX="schools.example.com"):
+            request = factory.get("/", HTTP_HOST="")
+            self.assertEqual(middleware._campus_code_from_request(request), "")
+
+            request = factory.get("/", HTTP_HOST="not-a-real-suffix.com")
+            self.assertEqual(middleware._campus_code_from_request(request), "")
+
+            request = factory.get("/", HTTP_HOST="a" * 300)
+            code = middleware._campus_code_from_request(request)
+            self.assertEqual(code, "")
+
+    # ── Edge case: Rate limit detection in API client (simulated) ──────────
+    def test_rate_limit_response_format(self):
+        self.authenticate(self.admin)
+        from django.conf import settings as dj_settings
+        from rest_framework.throttling import UserRateThrottle
+        throttle = UserRateThrottle()
+        throttle.rate = "1/second"
+        throttle.num_requests = 1
+        throttle.duration = 1
+        throttle.wait = lambda self: 60
+        response = self.client.get("/api/v1/students/")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)

@@ -74,7 +74,7 @@ The seeded Super Admin is always active, staff, and superuser. The API and admin
 Set `CAMPUS_DATABASE_URLS` to route a campus code to a separate database:
 
 ```dotenv
-CAMPUS_DATABASE_URLS=M360-MAIN=postgres://user:pass@host:5432/mentriq360_main;M360-NORTH=postgres://user:pass@host:5432/mentriq360_north
+CAMPUS_DATABASE_URLS=M360-MAIN=postgres://<user>:<pass>@<host>:5432/mentriq360_main;M360-NORTH=postgres://<user>:<pass>@<host>:5432/mentriq360_north
 ```
 
 Run tenant migrations with:

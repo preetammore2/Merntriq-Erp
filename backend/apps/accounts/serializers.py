@@ -40,6 +40,7 @@ def _validate_password_strength(password: str) -> str:
 # ─── Brute-force lockout helpers ─────────────────────────────────────────────
 
 _FAIL_PREFIX = "auth_fail:"
+_FAIL_IP_PREFIX = "auth_fail_ip:"
 _MAX_FAILURES = 5
 _LOCKOUT_SECONDS = 15 * 60   # 15 minutes
 
@@ -48,20 +49,36 @@ def _fail_key(username: str) -> str:
     return f"{_FAIL_PREFIX}{username.strip().lower()}"
 
 
-def _is_locked_out(username: str) -> bool:
-    return int(cache.get(_fail_key(username)) or 0) >= _MAX_FAILURES
+def _fail_ip_key(ip: str) -> str:
+    return f"{_FAIL_IP_PREFIX}{ip}"
 
 
-def _record_failure(username: str) -> None:
+def _is_locked_out(username: str, ip: str | None = None) -> bool:
+    if int(cache.get(_fail_key(username)) or 0) >= _MAX_FAILURES:
+        return True
+    if ip and int(cache.get(_fail_ip_key(ip)) or 0) >= _MAX_FAILURES * 2:
+        return True
+    return False
+
+
+def _record_failure(username: str, ip: str | None = None) -> None:
     key = _fail_key(username)
     try:
         cache.incr(key)
     except ValueError:
         cache.set(key, 1, timeout=_LOCKOUT_SECONDS)
+    if ip:
+        ip_key = _fail_ip_key(ip)
+        try:
+            cache.incr(ip_key)
+        except ValueError:
+            cache.set(ip_key, 1, timeout=_LOCKOUT_SECONDS)
 
 
-def _clear_failures(username: str) -> None:
+def _clear_failures(username: str, ip: str | None = None) -> None:
     cache.delete(_fail_key(username))
+    if ip:
+        cache.delete(_fail_ip_key(ip))
 
 
 # ─── Serializers ─────────────────────────────────────────────────────────────
@@ -127,42 +144,47 @@ class UserSerializer(serializers.ModelSerializer):
         return obj.get_full_name() or obj.username
 
     def get_campuses(self, obj: User) -> list[dict]:
-        memberships = getattr(obj, "campus_memberships", None)
-        if memberships is None:
+        memberships = list(obj.get_campus_memberships())
+        if not memberships and obj.school_id:
+            school = obj.school
+            if school:
+                return [
+                    {
+                        "id": obj.school_id,
+                        "name": school.name,
+                        "code": school.code,
+                        "logo_url": school.logo_url,
+                        "logo_alt_text": school.logo_alt_text,
+                        "role": "school",
+                        "is_primary": True,
+                        "can_manage_users": obj.role == UserRole.SCHOOL_ADMIN,
+                        "can_configure_attendance": obj.role == UserRole.SCHOOL_ADMIN,
+                    }
+                ]
             return []
-        scoped_memberships = list(memberships.select_related("campus").all())
-        if not scoped_memberships and obj.school_id:
-            return [
-                {
-                    "id": obj.school_id,
-                    "name": obj.school.name,
-                    "code": obj.school.code,
-                    "logo_url": obj.school.logo_url,
-                    "logo_alt_text": obj.school.logo_alt_text,
-                    "role": "school",
-                    "is_primary": True,
-                    "can_manage_users": obj.role == UserRole.SCHOOL_ADMIN,
-                    "can_configure_attendance": obj.role == UserRole.SCHOOL_ADMIN,
-                }
-            ]
-        return [
-            {
+        result = []
+        for membership in memberships:
+            campus = membership.campus_obj
+            if not campus:
+                continue
+            result.append({
                 "id": membership.campus_id,
-                "name": membership.campus.name,
-                "code": membership.campus.code,
-                "logo_url": membership.campus.logo_url,
-                "logo_alt_text": membership.campus.logo_alt_text,
+                "name": campus.name,
+                "code": campus.code,
+                "logo_url": campus.logo_url,
+                "logo_alt_text": campus.logo_alt_text,
                 "role": membership.role,
                 "is_primary": membership.is_primary,
                 "can_manage_users": membership.can_manage_users,
                 "can_configure_attendance": membership.can_configure_attendance,
-            }
-            for membership in scoped_memberships
-        ]
+            })
+        return result
 
     def get_linked_student_profile(self, obj: User) -> dict | None:
         try:
-            student = obj.student_profile
+            student = obj.get_student_profile()
+            if not student:
+                return None
             return {
                 "id": student.id,
                 "admission_number": student.admission_number,
@@ -177,7 +199,9 @@ class UserSerializer(serializers.ModelSerializer):
 
     def get_linked_staff_profile(self, obj: User) -> dict | None:
         try:
-            staff = obj.staff_profile
+            staff = obj.get_staff_profile()
+            if not staff:
+                return None
             return {
                 "id": staff.id,
                 "employee_code": staff.employee_code,
@@ -250,7 +274,9 @@ class UserAdminSerializer(serializers.ModelSerializer):
 
     def get_linked_student_profile(self, obj: User) -> dict | None:
         try:
-            student = obj.student_profile
+            student = obj.get_student_profile()
+            if not student:
+                return None
             return {
                 "id": student.id,
                 "admission_number": student.admission_number,
@@ -265,7 +291,9 @@ class UserAdminSerializer(serializers.ModelSerializer):
 
     def get_linked_staff_profile(self, obj: User) -> dict | None:
         try:
-            staff = obj.staff_profile
+            staff = obj.get_staff_profile()
+            if not staff:
+                return None
             return {
                 "id": staff.id,
                 "employee_code": staff.employee_code,
@@ -280,20 +308,23 @@ class UserAdminSerializer(serializers.ModelSerializer):
         return obj.get_full_name() or obj.username
 
     def get_campuses(self, obj: User) -> list[dict]:
-        return [
-            {
+        result = []
+        for membership in obj.get_campus_memberships():
+            campus = membership.campus_obj
+            if not campus:
+                continue
+            result.append({
                 "id": membership.campus_id,
-                "name": membership.campus.name,
-                "code": membership.campus.code,
-                "logo_url": membership.campus.logo_url,
-                "logo_alt_text": membership.campus.logo_alt_text,
+                "name": campus.name,
+                "code": campus.code,
+                "logo_url": campus.logo_url,
+                "logo_alt_text": campus.logo_alt_text,
                 "role": membership.role,
                 "is_primary": membership.is_primary,
                 "can_manage_users": membership.can_manage_users,
                 "can_configure_attendance": membership.can_configure_attendance,
-            }
-            for membership in obj.campus_memberships.select_related("campus").all()
-        ]
+            })
+        return result
 
     def validate_role(self, value):
         if value == UserRole.SUPER_ADMIN:
@@ -310,7 +341,7 @@ class UserAdminSerializer(serializers.ModelSerializer):
             return value
         from apps.core.models import CampusMembership
 
-        allowed = set(CampusMembership.objects.filter(user=request.user).values_list("campus_id", flat=True))
+        allowed = set(CampusMembership.objects.filter(user_id=request.user.pk).values_list("campus_id", flat=True))
         if not set(value).issubset(allowed):
             raise serializers.ValidationError("Admins can assign users only to their own campuses.")
         return value
@@ -321,7 +352,7 @@ class UserAdminSerializer(serializers.ModelSerializer):
         school = attrs.get("school", getattr(self.instance, "school", None))
         request = self.context.get("request")
         if role == UserRole.SUPER_ADMIN:
-            attrs["school"] = None
+            attrs["school_id"] = None
             attrs["campus_ids"] = None
             return attrs
         if campus_ids is not None and not campus_ids:
@@ -331,21 +362,21 @@ class UserAdminSerializer(serializers.ModelSerializer):
         if school and request and getattr(request.user, "role", None) != UserRole.SUPER_ADMIN:
             from apps.core.models import CampusMembership
 
-            allowed = set(CampusMembership.objects.filter(user=request.user).values_list("campus_id", flat=True))
-            if school.id not in allowed:
+            allowed = set(CampusMembership.objects.filter(user_id=request.user.pk).values_list("campus_id", flat=True))
+            if getattr(school, "id", None) not in allowed:
                 raise serializers.ValidationError({"school": "Admins can assign users only to their own school."})
         if campus_ids:
             attrs["school_id"] = campus_ids[0]
         return attrs
 
     def sync_campus_memberships(self, user: User, campus_ids: list[int] | None) -> None:
-        if campus_ids is None and user.school_id and not user.campus_memberships.exists():
+        if campus_ids is None and user.school_id and not user.get_campus_memberships():
             campus_ids = [user.school_id]
         if campus_ids is None:
             return
         from apps.core.models import CampusMemberRole, CampusMembership
 
-        CampusMembership.objects.filter(user=user).delete()
+        CampusMembership.objects.filter(user_id=user.pk).delete()
         role_map = {
             UserRole.SCHOOL_ADMIN: CampusMemberRole.IT_ADMIN,
             UserRole.ACCOUNT: CampusMemberRole.FINANCE_ADMIN,
@@ -356,7 +387,7 @@ class UserAdminSerializer(serializers.ModelSerializer):
         unique_campus_ids = list(dict.fromkeys(campus_ids))[:1]
         if unique_campus_ids:
             user.school_id = unique_campus_ids[0]
-            user.save(update_fields=["school", "updated_at"])
+            user.save(update_fields=["school_id", "updated_at"])
         for index, campus_id in enumerate(unique_campus_ids):
             CampusMembership.objects.create(
                 user=user,
@@ -427,7 +458,8 @@ class ERPTokenObtainPairSerializer(TokenObtainPairSerializer):
         token["role"] = user.role
         token["username"] = user.username
         token["schoolId"] = user.school_id
-        token["schoolCode"] = user.school.code if user.school_id else ""
+        school = user.school
+        token["schoolCode"] = school.code if school else ""
         return token
 
     def validate(self, attrs):
@@ -441,9 +473,18 @@ class ERPTokenObtainPairSerializer(TokenObtainPairSerializer):
 
         username = attrs.get(self.username_field, "").strip()
 
+        request = self.context.get("request")
+        client_ip = None
+        if request:
+            forwarded = request.META.get("HTTP_X_FORWARDED_FOR")
+            if forwarded:
+                client_ip = forwarded.split(",")[0].strip()
+            else:
+                client_ip = request.META.get("REMOTE_ADDR")
+
         # Brute-force lockout check (checked after captcha to avoid enumeration
         # of locked accounts without solving a captcha first).
-        if username and _is_locked_out(username):
+        if username and _is_locked_out(username, client_ip):
             raise serializers.ValidationError(
                 {"non_field_errors": ["Login temporarily locked due to repeated failures. Please try again in 15 minutes."]}
             )
@@ -452,24 +493,24 @@ class ERPTokenObtainPairSerializer(TokenObtainPairSerializer):
             data = super().validate(attrs)
         except (serializers.ValidationError, AuthenticationFailed):
             if username:
-                _record_failure(username)
+                _record_failure(username, client_ip)
             raise
 
         # Successful authentication — clear the failure counter.
         if username:
-            _clear_failures(username)
+            _clear_failures(username, client_ip)
 
         if self.user.role != UserRole.SUPER_ADMIN:
             campus = self.user.school
             if campus is None:
-                from apps.core.models import CampusMembership
+                from apps.core.models import Campus, CampusMembership
 
                 membership = (
-                    CampusMembership.objects.filter(user=self.user, is_primary=True)
-                    .select_related("campus")
-                    .first()
-                ) or CampusMembership.objects.filter(user=self.user).select_related("campus").first()
-                campus = membership.campus if membership else None
+                    CampusMembership.objects.filter(user_id=self.user.pk, is_primary=True).first()
+                    or CampusMembership.objects.filter(user_id=self.user.pk).first()
+                )
+                if membership and membership.campus_id:
+                    campus = Campus.objects.filter(id=membership.campus_id).first()
 
             if campus is None:
                 # Don't reveal that the account exists but has no school assignment.
@@ -500,8 +541,131 @@ class PasswordChangeSerializer(serializers.Serializer):
         return _validate_password_strength(value)
 
     def save(self, **kwargs):
+        from django.utils import timezone
         user = self.context["request"].user
         user.set_password(self.validated_data["new_password"])
         user.must_change_password = False
-        user.save(update_fields=["password", "must_change_password", "updated_at"])
+        user.password_changed_at = timezone.now()
+        user.save(update_fields=["password", "must_change_password", "password_changed_at", "updated_at"])
         return user
+
+
+class PasswordResetRequestSerializer(serializers.Serializer):
+    email = serializers.EmailField()
+
+    def validate_email(self, value):
+        user = User.objects.filter(email__iexact=value).first()
+        if not user:
+            raise serializers.ValidationError("No account found with this email address.")
+        return value
+
+    def save(self, **kwargs):
+        from django.utils import timezone
+        from django.core.signing import TimestampSigner
+        from django.conf import settings
+        email = self.validated_data["email"]
+        user = User.objects.filter(email__iexact=email).first()
+        if not user:
+            return None
+        signer = TimestampSigner(salt="password-reset")
+        token = signer.sign(f"{user.pk}:{user.username}")
+        return {
+            "email": email,
+            "token": token,
+            "expires_in_minutes": settings.MENTRIQ_PASSWORD_RESET_TOKEN_MINUTES,
+        }
+
+
+class PasswordResetConfirmSerializer(serializers.Serializer):
+    token = serializers.CharField()
+    new_password = serializers.CharField(write_only=True, min_length=_PASSWORD_MIN_LENGTH)
+
+    def validate_new_password(self, value: str) -> str:
+        return _validate_password_strength(value)
+
+    def validate(self, attrs):
+        from django.core.signing import TimestampSigner, SignatureExpired, BadSignature
+        from django.conf import settings
+        from django.utils import timezone
+        signer = TimestampSigner(salt="password-reset")
+        token = attrs.get("token", "")
+        try:
+            unsigned = signer.unsign(token, max_age=settings.MENTRIQ_PASSWORD_RESET_TOKEN_MINUTES * 60)
+        except SignatureExpired:
+            raise serializers.ValidationError({"token": "Password reset token has expired. Please request a new one."})
+        except BadSignature:
+            raise serializers.ValidationError({"token": "Invalid password reset token."})
+        parts = unsigned.split(":", 1)
+        if len(parts) != 2:
+            raise serializers.ValidationError({"token": "Malformed password reset token."})
+        pk_str, username = parts
+        user = User.objects.filter(pk=int(pk_str), username=username).first()
+        if not user:
+            raise serializers.ValidationError({"token": "Invalid password reset token."})
+        attrs["_user"] = user
+        return attrs
+
+    def save(self, **kwargs):
+        from django.utils import timezone
+        user = self.validated_data["_user"]
+        user.set_password(self.validated_data["new_password"])
+        user.must_change_password = False
+        user.password_changed_at = timezone.now()
+        user.save(update_fields=["password", "must_change_password", "password_changed_at", "updated_at"])
+        return user
+
+
+class EmailVerificationSendSerializer(serializers.Serializer):
+    def validate(self, attrs):
+        request = self.context.get("request")
+        if not request or not request.user.is_authenticated:
+            raise serializers.ValidationError("Authentication required.")
+        if request.user.is_email_verified:
+            raise serializers.ValidationError("Email is already verified.")
+        return attrs
+
+    def save(self, **kwargs):
+        from django.core.signing import TimestampSigner
+        from django.conf import settings
+        request = self.context["request"]
+        user = request.user
+        signer = TimestampSigner(salt="email-verification")
+        token = signer.sign(f"{user.pk}:{user.email}")
+        return {
+            "token": token,
+            "expires_in_hours": settings.MENTRIQ_VERIFICATION_TOKEN_HOURS,
+        }
+
+
+class EmailVerificationConfirmSerializer(serializers.Serializer):
+    token = serializers.CharField()
+
+    def validate(self, attrs):
+        from django.core.signing import TimestampSigner, SignatureExpired, BadSignature
+        from django.conf import settings
+        signer = TimestampSigner(salt="email-verification")
+        token = attrs.get("token", "")
+        try:
+            unsigned = signer.unsign(token, max_age=settings.MENTRIQ_VERIFICATION_TOKEN_HOURS * 3600)
+        except SignatureExpired:
+            raise serializers.ValidationError({"token": "Verification token has expired. Please request a new one."})
+        except BadSignature:
+            raise serializers.ValidationError({"token": "Invalid verification token."})
+        parts = unsigned.split(":", 1)
+        if len(parts) != 2:
+            raise serializers.ValidationError({"token": "Malformed verification token."})
+        pk_str, email = parts
+        user = User.objects.filter(pk=int(pk_str)).first()
+        if not user:
+            raise serializers.ValidationError({"token": "Invalid verification token."})
+        if user.is_email_verified:
+            raise serializers.ValidationError("Email is already verified.")
+        attrs["_user"] = user
+        return attrs
+
+    def save(self, **kwargs):
+        user = self.validated_data["_user"]
+        user.is_email_verified = True
+        user.save(update_fields=["is_email_verified", "updated_at"])
+        return user
+

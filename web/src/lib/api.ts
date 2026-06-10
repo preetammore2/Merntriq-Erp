@@ -4,7 +4,6 @@
  */
 
 const CONFIGURED_API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL;
-const PRODUCTION_API_BASE = "https://backend-nu-self-91.vercel.app/api/v1";
 const LOCAL_API_PORT = process.env.NEXT_PUBLIC_LOCAL_API_PORT ?? "8000";
 const configuredTimeout = Number(process.env.NEXT_PUBLIC_API_TIMEOUT_MS ?? "60000");
 const REQUEST_TIMEOUT_MS = Number.isFinite(configuredTimeout) ? Math.max(configuredTimeout, 60000) : 60000;
@@ -17,6 +16,30 @@ const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "0.0.0.0", "::1", "[::
 
 function trimTrailingSlash(value: string) {
   return value.replace(/\/+$/, "");
+}
+
+const UPLOAD_SIZE_LIMITS: Record<string, number> = {
+  logo: 524288,
+  banner: 1048576,
+  photo: 2097152,
+  document: 5242880,
+  marks: 5242880,
+  academic: 10485760,
+};
+
+export function assertFileSize(file: File, category: keyof typeof UPLOAD_SIZE_LIMITS): void {
+  const limit = UPLOAD_SIZE_LIMITS[category];
+  if (file.size > limit) {
+    const mb = (limit / 1048576).toFixed(1);
+    throw new ApiError(413, `File exceeds the ${mb} MB limit for ${category} uploads.`);
+  }
+}
+
+export function assertFileSizeWithLimit(file: File, maxBytes: number, label: string): void {
+  if (file.size > maxBytes) {
+    const mb = (maxBytes / 1048576).toFixed(1);
+    throw new ApiError(413, `File exceeds the ${mb} MB limit for ${label}.`);
+  }
 }
 
 function localApiBase(hostname = "localhost") {
@@ -33,7 +56,8 @@ function getApiBase() {
   const configuredBase = configuredApiBase();
   if (configuredBase) return configuredBase;
   if (typeof window === "undefined") {
-    return process.env.NODE_ENV === "production" ? PRODUCTION_API_BASE : localApiBase();
+    if (process.env.NODE_ENV !== "production") return localApiBase();
+    throw new Error("NEXT_PUBLIC_API_BASE_URL must be set in production");
   }
 
   try {
@@ -42,9 +66,10 @@ function getApiBase() {
     if (window.location.protocol === "http:" && window.location.port) {
       return localApiBase(pageHost);
     }
-    return PRODUCTION_API_BASE;
+    throw new Error("NEXT_PUBLIC_API_BASE_URL must be set in production");
   } catch {
-    return process.env.NODE_ENV === "production" ? PRODUCTION_API_BASE : localApiBase();
+    if (process.env.NODE_ENV !== "production") return localApiBase();
+    throw new Error("NEXT_PUBLIC_API_BASE_URL must be set in production");
   }
 }
 
@@ -61,7 +86,7 @@ function getAccess() {
   if (typeof window === "undefined") return null;
   return localStorage.getItem("erp_access");
 }
-function getRefresh() {
+export function getRefresh() {
   if (typeof window === "undefined") return null;
   return localStorage.getItem("erp_refresh");
 }
@@ -131,22 +156,32 @@ function notifySessionExpired() {
 }
 
 // ─── Core fetch wrapper ───────────────────────────────────────────────────────
+let refreshPromise: Promise<string | null> | null = null;
+
 async function refreshAccessToken(): Promise<string | null> {
+  if (refreshPromise) return refreshPromise;
   const refresh = getRefresh();
   if (!refresh) return null;
+  refreshPromise = (async () => {
+    try {
+      const res = await fetch(`${getAuthBase()}/token/refresh/`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ refresh }),
+      });
+      if (!res.ok) { clearTokens(); return null; }
+      const data = await res.json();
+      storeTokens(data.access, refresh);
+      return data.access;
+    } catch {
+      clearTokens();
+      return null;
+    }
+  })();
   try {
-    const res = await fetch(`${getAuthBase()}/token/refresh/`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ refresh }),
-    });
-    if (!res.ok) { clearTokens(); return null; }
-    const data = await res.json();
-    storeTokens(data.access, refresh);
-    return data.access;
-  } catch {
-    clearTokens();
-    return null;
+    return await refreshPromise;
+  } finally {
+    refreshPromise = null;
   }
 }
 
@@ -2283,12 +2318,14 @@ export const schoolApi = {
   createAdmin: (id: number, data: Partial<SchoolPayload>) =>
     apiFetch<SchoolAdminCredentials>(`/schools/${id}/create-admin/`, { method: "POST", body: JSON.stringify(data) }),
   uploadLogo: (id: number, file: File, altText?: string) => {
+    assertFileSize(file, "logo");
     const form = new FormData();
     form.append("file", file);
     if (altText) form.append("altText", altText);
     return apiFetch<School>(`/schools/${id}/upload-logo/`, { method: "POST", body: form });
   },
   uploadBanner: (id: number, file: File) => {
+    assertFileSize(file, "banner");
     const form = new FormData();
     form.append("file", file);
     return apiFetch<School>(`/schools/${id}/upload-banner/`, { method: "POST", body: form });
@@ -2406,11 +2443,13 @@ export const studentApi = {
     apiFetch<Student>(`/students/${id}/`, { method: "PATCH", body: JSON.stringify(data) }),
   remove: (id: number) => apiFetch<void>(`/students/${id}/`, { method: "DELETE" }),
   uploadPhoto: (id: number, file: File) => {
+    assertFileSize(file, "photo");
     const form = new FormData();
     form.append("file", file);
     return apiFetch<Student>(`/students/${id}/upload-photo/`, { method: "POST", body: form });
   },
   uploadDocument: (id: number, file: File, title: string, document_type: string) => {
+    assertFileSize(file, "document");
     const form = new FormData();
     form.append("file", file);
     form.append("title", title);
@@ -2505,11 +2544,13 @@ export const staffProfileApi = {
     apiFetch<StaffProfile>(`/staff-profiles/${id}/`, { method: "PATCH", body: JSON.stringify(data) }),
   remove: (id: number) => apiFetch<void>(`/staff-profiles/${id}/`, { method: "DELETE" }),
   uploadPhoto: (id: number, file: File) => {
+    assertFileSize(file, "photo");
     const form = new FormData();
     form.append("file", file);
     return apiFetch<StaffProfile>(`/staff-profiles/${id}/upload-photo/`, { method: "POST", body: form });
   },
   uploadDocument: (id: number, file: File, title: string, document_type: string) => {
+    assertFileSize(file, "document");
     const form = new FormData();
     form.append("file", file);
     form.append("title", title);
@@ -2685,6 +2726,7 @@ export const assignedWorkApi = {
     status?: AcademicWorkStatus;
     file: File;
   }) => {
+    assertFileSize(data.file, "academic");
     const form = new FormData();
     form.append("section", String(data.section));
     form.append("title", data.title);
@@ -2702,6 +2744,7 @@ export const assignedWorkApi = {
   unpublish: (id: number) => apiFetch<AssignedWork>(`/assigned-work/${id}/unpublish/`, { method: "POST", body: JSON.stringify({}) }),
   download: (id: number) => apiDownload(`/assigned-work/${id}/download/`),
   submit: (id: number, file: File, notes = "") => {
+    assertFileSize(file, "academic");
     const form = new FormData();
     form.append("file", file);
     form.append("notes", notes);
@@ -2753,6 +2796,7 @@ export const learningResourceApi = {
     is_published?: boolean;
     file: File;
   }) => {
+    assertFileSize(data.file, "academic");
     const form = new FormData();
     form.append("section", String(data.section));
     form.append("title", data.title);
@@ -2792,6 +2836,7 @@ export const resultRecordApi = {
     apiFetch<ResultRecord>(`/result-records/${id}/`, { method: "PATCH", body: JSON.stringify(data) }),
   remove: (id: number) => apiFetch<void>(`/result-records/${id}/`, { method: "DELETE" }),
   uploadMarks: (id: number, file: File) => {
+    assertFileSize(file, "marks");
     const form = new FormData();
     form.append("file", file);
     return apiFetch<ResultRecord>(`/result-records/${id}/upload-marks/`, { method: "POST", body: form });

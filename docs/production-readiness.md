@@ -37,14 +37,14 @@ Do not commit production secrets. Set these in the hosting provider secret store
 ```env
 DJANGO_SETTINGS_MODULE=config.settings.production
 DJANGO_SECRET_KEY=<rotated-64-byte-secret>
-DATABASE_URL=postgres://user:password@host:5432/mentriq360
+DATABASE_URL=postgres://<username>:<password>@<host>:5432/mentriq360
 POSTGRES_SSLMODE=require
 POSTGRES_CONN_MAX_AGE=60
 DJANGO_ALLOWED_HOSTS=api.mentriq360.example.com,.vercel.app
 DJANGO_CORS_ALLOWED_ORIGINS=https://app.mentriq360.example.com
 DJANGO_CSRF_TRUSTED_ORIGINS=https://app.mentriq360.example.com
 DJANGO_USE_X_FORWARDED_HOST=True
-DJANGO_CACHE_URL=redis://user:password@redis-host:6379/1
+DJANGO_CACHE_URL=redis://<username>:<password>@<redis-host>:6379/1
 NEXT_PUBLIC_SITE_URL=https://app.mentriq360.example.com
 NEXT_PUBLIC_API_BASE_URL=https://api.mentriq360.example.com/api/v1
 NEXT_PUBLIC_TENANT_DOMAIN_SUFFIX=schools.mentriq360.example.com
@@ -59,7 +59,7 @@ School-wise payment gateway and communication secrets are configured inside the 
 For optional separate school databases, set:
 
 ```env
-CAMPUS_DATABASE_URLS=M360-MAIN=postgres://user:pass@host:5432/main;M360-NORTH=postgres://user:pass@host:5432/north
+CAMPUS_DATABASE_URLS=M360-MAIN=postgres://<user>:<pass>@<host>:5432/main;M360-NORTH=postgres://<user>:<pass>@<host>:5432/north
 ```
 
 Then run:

@@ -1,14 +1,14 @@
 from datetime import timedelta
 from pathlib import Path
-import re
 
 import environ
+import mongoengine
+from pymongo import MongoClient
 
 BASE_DIR = Path(__file__).resolve().parents[2]
 
 env = environ.Env(
     DJANGO_DEBUG=(bool, False),
-    DJANGO_USE_SQLITE=(bool, False),
     DJANGO_ALLOWED_HOSTS=(list, ["localhost", "127.0.0.1"]),
     DJANGO_CORS_ALLOWED_ORIGINS=(list, ["http://localhost:3000"]),
     DJANGO_CSRF_TRUSTED_ORIGINS=(list, []),
@@ -19,15 +19,15 @@ env = environ.Env(
     DJANGO_THROTTLE_USER_RATE=(str, "300/minute"),
     DJANGO_THROTTLE_AUTH_RATE=(str, "10/minute"),
     DJANGO_THROTTLE_CAPTCHA_RATE=(str, "30/minute"),
+    DJANGO_THROTTLE_CHANGE_PASSWORD_RATE=(str, "3/minute"),
+    DJANGO_THROTTLE_PASSWORD_RESET_RATE=(str, "3/minute"),
     DJANGO_THROTTLE_HARDWARE_CAPTURE_RATE=(str, "1200/minute"),
     DJANGO_THROTTLE_PAYMENT_RATE=(str, "120/minute"),
+    DJANGO_THROTTLE_AI_GENERATION_RATE=(str, "20/minute"),
+    DJANGO_THROTTLE_USER_CREATION_RATE=(str, "10/hour"),
     DJANGO_PAGE_SIZE=(int, 50),
     DJANGO_MAX_PAGE_SIZE=(int, 200),
     DJANGO_CACHE_URL=(str, ""),
-    DATABASE_URL=(str, ""),
-    POSTGRES_CONN_MAX_AGE=(int, 60),
-    POSTGRES_SSLMODE=(str, ""),
-    CAMPUS_DATABASE_URLS=(str, ""),
     DJANGO_TENANT_DOMAIN_SUFFIX=(str, ""),
     DJANGO_TENANT_ROUTED_APPS=(str, "admin,auth,contenttypes,sessions,token_blacklist,accounts,core"),
     DJANGO_MEDIA_URL=(str, "/media/"),
@@ -35,6 +35,8 @@ env = environ.Env(
     DJANGO_FILE_UPLOAD_MAX_MEMORY_SIZE=(int, 10485760),
     DJANGO_DATA_UPLOAD_MAX_MEMORY_SIZE=(int, 10485760),
     DJANGO_LOG_LEVEL=(str, "INFO"),
+    MONGODB_URI=(str, ""),
+    MONGODB_DATABASE=(str, "mentriq360"),
     MENTRIQ_AI_PROVIDER=(str, "local"),
     MENTRIQ_AI_MODEL=(str, "role-scoped-summary"),
     MENTRIQ_AI_API_KEY=(str, ""),
@@ -43,14 +45,27 @@ env = environ.Env(
     MENTRIQ_UPLOAD_PHOTO_MAX_BYTES=(int, 2097152),
     MENTRIQ_UPLOAD_DOCUMENT_MAX_BYTES=(int, 5242880),
     MENTRIQ_UPLOAD_ACADEMIC_MAX_BYTES=(int, 10485760),
+    DATABASE_URL=(str, ""),
     MENTRIQ_SUPER_ADMIN_USERNAME=(str, "super.admin"),
     MENTRIQ_SUPER_ADMIN_EMAIL=(str, "super.admin@mentriq360.local"),
     MENTRIQ_SUPER_ADMIN_PASSWORD=(str, ""),
+    MENTRIQ_PASSWORD_RESET_TOKEN_MINUTES=(int, 30),
+    MENTRIQ_VERIFICATION_TOKEN_HOURS=(int, 48),
+    MENTRIQ_PASSWORD_EXPIRY_DAYS=(int, 90),
 )
 
 environ.Env.read_env(BASE_DIR.parent / ".env")
 
-SECRET_KEY = env("DJANGO_SECRET_KEY", default="change-me")
+SECRET_KEY = env("DJANGO_SECRET_KEY")
+_KEY_BYTES = len(SECRET_KEY.encode("utf-8"))
+if _KEY_BYTES < 64:
+    import warnings
+    warnings.warn(
+        f"DJANGO_SECRET_KEY is only {_KEY_BYTES} bytes; "
+        f"recommend at least 64 bytes. "
+        f"Generate a strong secret with: python -c \"import secrets; print(secrets.token_urlsafe(64))\""
+    )
+
 DEBUG = env("DJANGO_DEBUG")
 ALLOWED_HOSTS = env("DJANGO_ALLOWED_HOSTS")
 CSRF_TRUSTED_ORIGINS = env("DJANGO_CSRF_TRUSTED_ORIGINS")
@@ -79,10 +94,12 @@ MIDDLEWARE = [
     "corsheaders.middleware.CorsMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
+    "apps.core.middleware.AbuseGuardMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
     "apps.core.middleware.CampusTenantMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
+    "apps.core.middleware.SecurityLoggingMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
 ]
 
@@ -105,66 +122,39 @@ TEMPLATES = [
     }
 ]
 
-def campus_database_alias(campus_code: str) -> str:
-    slug = re.sub(r"[^a-z0-9]+", "_", campus_code.strip().lower()).strip("_")
-    return f"campus_{slug}" if slug else ""
+# ─── MongoDB (Primary Data Store) ─────────────────────────────────────
+MONGODB_URI = env("MONGODB_URI").strip()
+MONGODB_DB_NAME = env("MONGODB_DATABASE").strip()
+MONGODB_CLIENT: MongoClient | None = None
+MONGODB_DATABASE = None
 
-
-def apply_database_runtime_options(config: dict) -> dict:
-    engine = config.get("ENGINE", "")
-    if "postgresql" not in engine:
-        return config
-    config["CONN_MAX_AGE"] = env("POSTGRES_CONN_MAX_AGE")
-    sslmode = env("POSTGRES_SSLMODE").strip()
-    if sslmode:
-        config.setdefault("OPTIONS", {})["sslmode"] = sslmode
-    return config
-
-
-def parse_campus_database_urls(raw_value: str) -> tuple[dict, dict[str, str]]:
-    databases = {}
-    aliases = {}
-    for entry in [item.strip() for item in raw_value.split(";") if item.strip()]:
-        if "=" not in entry:
-            raise ValueError("CAMPUS_DATABASE_URLS entries must use CAMPUS_CODE=database_url format.")
-        campus_code, database_url = entry.split("=", 1)
-        campus_code = campus_code.strip().upper()
-        alias = campus_database_alias(campus_code)
-        if not alias:
-            raise ValueError("CAMPUS_DATABASE_URLS contains an empty campus code.")
-        databases[alias] = apply_database_runtime_options(environ.Env.db_url_config(database_url.strip()))
-        aliases[campus_code] = alias
-    return databases, aliases
-
-
-database_url = env("DATABASE_URL").strip()
-if database_url:
-    DATABASES = {
-        "default": apply_database_runtime_options(environ.Env.db_url_config(database_url))
+if MONGODB_URI:
+    MONGO_OPTS = {
+        "serverSelectionTimeoutMS": 5000,
+        "connectTimeoutMS": 5000,
+        "socketTimeoutMS": 30000,
+        "maxPoolSize": 50,
+        "minPoolSize": 5,
+        "maxIdleTimeMS": 300000,
+        "retryWrites": True,
+        "retryReads": True,
     }
-elif env("DJANGO_USE_SQLITE"):
-    DATABASES = {
-        "default": {
-            "ENGINE": "django.db.backends.sqlite3",
-            "NAME": BASE_DIR / "db.sqlite3",
-        }
-    }
-else:
-    DATABASES = {
-        "default": {
-            "ENGINE": "django.db.backends.postgresql",
-            "NAME": env("POSTGRES_DB", default="mentriq360"),
-            "USER": env("POSTGRES_USER", default="mentriq360"),
-            "PASSWORD": env("POSTGRES_PASSWORD", default="change-me"),
-            "HOST": env("POSTGRES_HOST", default="localhost"),
-            "PORT": env("POSTGRES_PORT", default="5432"),
-        }
-    }
-    DATABASES["default"] = apply_database_runtime_options(DATABASES["default"])
+    MONGODB_CLIENT = MongoClient(MONGODB_URI, **MONGO_OPTS)
+    MONGODB_DATABASE = MONGODB_CLIENT[MONGODB_DB_NAME]
+    mongoengine.connect(
+        db=MONGODB_DB_NAME,
+        host=MONGODB_URI,
+        **MONGO_OPTS,
+    )
 
-CAMPUS_DATABASES, CAMPUS_DATABASE_ALIASES = parse_campus_database_urls(env("CAMPUS_DATABASE_URLS"))
-DATABASES.update(CAMPUS_DATABASES)
-CAMPUS_DATABASE_ALIAS_SET = set(CAMPUS_DATABASES.keys())
+# ─── Minimal SQLite for Django Internals ────────────────────────────
+DATABASES = {
+    "default": {
+        "ENGINE": "django.db.backends.sqlite3",
+        "NAME": BASE_DIR / "db.sqlite3",
+    }
+}
+
 TENANT_ROUTED_APPS = tuple(
     item.strip()
     for item in env("DJANGO_TENANT_ROUTED_APPS").split(",")
@@ -172,7 +162,20 @@ TENANT_ROUTED_APPS = tuple(
 )
 TENANT_CAMPUS_HEADER = "HTTP_X_CAMPUS_CODE"
 TENANT_DOMAIN_SUFFIX = env("DJANGO_TENANT_DOMAIN_SUFFIX").strip().lower().strip(".")
-DATABASE_ROUTERS = ["apps.core.db_router.CampusTenantRouter"]
+
+AUTHENTICATION_BACKENDS = [
+    "apps.accounts.auth_backend.MongoDBAuthBackend",
+    "django.contrib.auth.backends.ModelBackend",
+]
+
+PASSWORD_HASHERS = [
+    "django.contrib.auth.hashers.Argon2PasswordHasher",
+    "django.contrib.auth.hashers.PBKDF2PasswordHasher",
+    "django.contrib.auth.hashers.PBKDF2SHA1PasswordHasher",
+    "django.contrib.auth.hashers.BCryptSHA256PasswordHasher",
+]
+
+MINIMUM_SECRET_KEY_LENGTH = 64
 
 AUTH_PASSWORD_VALIDATORS = [
     {"NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator"},
@@ -196,8 +199,8 @@ MEDIA_ROOT = Path(env("DJANGO_MEDIA_ROOT")) if env("DJANGO_MEDIA_ROOT") else BAS
 FILE_UPLOAD_MAX_MEMORY_SIZE = env("DJANGO_FILE_UPLOAD_MAX_MEMORY_SIZE")
 DATA_UPLOAD_MAX_MEMORY_SIZE = env("DJANGO_DATA_UPLOAD_MAX_MEMORY_SIZE")
 
-DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 AUTH_USER_MODEL = "accounts.User"
+DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 MENTRIQ_SUPER_ADMIN_USERNAME = env("MENTRIQ_SUPER_ADMIN_USERNAME").strip()
 MENTRIQ_SUPER_ADMIN_EMAIL = env("MENTRIQ_SUPER_ADMIN_EMAIL").strip()
@@ -210,6 +213,9 @@ MENTRIQ_UPLOAD_BANNER_MAX_BYTES = env("MENTRIQ_UPLOAD_BANNER_MAX_BYTES")
 MENTRIQ_UPLOAD_PHOTO_MAX_BYTES = env("MENTRIQ_UPLOAD_PHOTO_MAX_BYTES")
 MENTRIQ_UPLOAD_DOCUMENT_MAX_BYTES = env("MENTRIQ_UPLOAD_DOCUMENT_MAX_BYTES")
 MENTRIQ_UPLOAD_ACADEMIC_MAX_BYTES = env("MENTRIQ_UPLOAD_ACADEMIC_MAX_BYTES")
+MENTRIQ_PASSWORD_RESET_TOKEN_MINUTES = env("MENTRIQ_PASSWORD_RESET_TOKEN_MINUTES")
+MENTRIQ_VERIFICATION_TOKEN_HOURS = env("MENTRIQ_VERIFICATION_TOKEN_HOURS")
+MENTRIQ_PASSWORD_EXPIRY_DAYS = env("MENTRIQ_PASSWORD_EXPIRY_DAYS")
 
 CORS_ALLOWED_ORIGINS = env("DJANGO_CORS_ALLOWED_ORIGINS")
 CORS_ALLOW_CREDENTIALS = True
@@ -243,8 +249,8 @@ REST_FRAMEWORK = {
     "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
     "DEFAULT_FILTER_BACKENDS": (
         "django_filters.rest_framework.DjangoFilterBackend",
-        "rest_framework.filters.OrderingFilter",
-        "rest_framework.filters.SearchFilter",
+        "apps.core.input.SafeOrderingFilter",
+        "apps.core.input.SafeSearchFilter",
     ),
     "DEFAULT_THROTTLE_CLASSES": (
         "rest_framework.throttling.AnonRateThrottle",
@@ -255,9 +261,13 @@ REST_FRAMEWORK = {
         "anon": env("DJANGO_THROTTLE_ANON_RATE"),
         "user": env("DJANGO_THROTTLE_USER_RATE"),
         "auth": env("DJANGO_THROTTLE_AUTH_RATE"),
+        "change_password": env("DJANGO_THROTTLE_CHANGE_PASSWORD_RATE"),
+        "password_reset": env("DJANGO_THROTTLE_PASSWORD_RESET_RATE"),
         "captcha": env("DJANGO_THROTTLE_CAPTCHA_RATE"),
         "hardware_capture": env("DJANGO_THROTTLE_HARDWARE_CAPTURE_RATE"),
         "payment": env("DJANGO_THROTTLE_PAYMENT_RATE"),
+        "ai_generation": env("DJANGO_THROTTLE_AI_GENERATION_RATE"),
+        "user_creation": env("DJANGO_THROTTLE_USER_CREATION_RATE"),
     },
     "DEFAULT_PAGINATION_CLASS": "apps.core.pagination.OptionalPageNumberPagination",
     "PAGE_SIZE": env("DJANGO_PAGE_SIZE"),
@@ -328,11 +338,18 @@ LOGGING = {
         "console": {
             "format": "%(levelname)s %(asctime)s %(name)s %(message)s",
         },
+        "security": {
+            "format": "%(asctime)s %(levelname)s [security] %(message)s",
+        },
     },
     "handlers": {
         "console": {
             "class": "logging.StreamHandler",
             "formatter": "console",
+        },
+        "security_console": {
+            "class": "logging.StreamHandler",
+            "formatter": "security",
         },
     },
     "loggers": {
@@ -343,6 +360,11 @@ LOGGING = {
         "apps": {
             "handlers": ["console"],
             "level": env("DJANGO_LOG_LEVEL"),
+            "propagate": False,
+        },
+        "mentriq.security": {
+            "handlers": ["security_console"],
+            "level": "INFO",
             "propagate": False,
         },
     },

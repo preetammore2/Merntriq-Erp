@@ -12,3 +12,8 @@ if not env.bool("DJANGO_LOCAL_USE_REDIS", default=False):  # noqa: F405
             "LOCATION": "mentriq360-local-dev",
         }
     }
+
+# Security logger uses console only in development
+import logging  # noqa: F811
+logging.getLogger("mentriq.security").handlers.clear()
+logging.getLogger("mentriq.security").addHandler(logging.StreamHandler())
