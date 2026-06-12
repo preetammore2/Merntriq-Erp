@@ -49,6 +49,10 @@ jobs:
         working-directory: backend
         run: python manage.py test apps.accounts apps.core --verbosity 1
 
+      - name: API connection integration tests
+        working-directory: backend
+        run: python manage.py test apps.core.tests_api_connection --verbosity 1
+
       - name: Frontend lint
         run: pnpm --dir web lint
 

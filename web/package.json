@@ -12,7 +12,10 @@
     "cap:add:android": "cap add android",
     "cap:open:android": "cap open android",
     "start": "next start",
-    "lint": "eslint ."
+    "lint": "eslint .",
+    "test:e2e": "playwright test",
+    "test:e2e:headed": "playwright test --headed",
+    "test:e2e:report": "playwright show-report"
   },
   "dependencies": {
     "@capacitor/android": "^8.3.4",
@@ -24,6 +27,7 @@
     "react-dom": "19.2.5"
   },
   "devDependencies": {
+    "@playwright/test": "^1.60.0",
     "@types/node": "^22.0.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",

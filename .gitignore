@@ -31,5 +31,10 @@ __pycache__/
 *.log
 .vercel/
 
+# Playwright
+test-results/
+playwright-report/
+playwright/.cache/
+
 backend/staticfiles/
 backend/media/

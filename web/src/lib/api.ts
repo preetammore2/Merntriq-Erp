@@ -3344,6 +3344,9 @@ export const phase10Api = {
     },
     create: (data: Omit<SchoolWebsiteContent, "id" | "campus_name" | "created_by" | "created_at" | "updated_at">) =>
       apiFetch<SchoolWebsiteContent>("/school-website-contents/", { method: "POST", body: JSON.stringify(data) }),
+    update: (id: number, data: Partial<SchoolWebsiteContent>) =>
+      apiFetch<SchoolWebsiteContent>(`/school-website-contents/${id}/`, { method: "PATCH", body: JSON.stringify(data) }),
+    remove: (id: number) => apiFetch<void>(`/school-website-contents/${id}/`, { method: "DELETE" }),
   },
   pushNotifications: {
     list: (params?: Record<string, string>) => {

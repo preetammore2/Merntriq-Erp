@@ -10,6 +10,7 @@ import {
   Download,
   Eye,
   FileSpreadsheet,
+  Globe2,
   GraduationCap,
   Mail,
   MapPin,
@@ -43,10 +44,11 @@ import {
 } from "@/lib/api";
 import { Badge, statusBadge } from "@/components/ui/badge";
 import { Modal } from "@/components/ui/modal";
+import { WebsiteCMS } from "@/components/admin/website-cms";
 import { WorkspacePlaceholder } from "@/components/ui/workspace-placeholder";
 import { useAuth } from "@/lib/auth-context";
 
-type AdminView = "students" | "campuses" | "sessions" | "sections" | "users";
+type AdminView = "students" | "campuses" | "sessions" | "sections" | "users" | "website";
 
 const adminViews: {
   id: AdminView;
@@ -57,6 +59,7 @@ const adminViews: {
   { id: "sessions", icon: CalendarDays },
   { id: "sections", icon: BookOpen },
   { id: "users", icon: UserCog },
+  { id: "website", icon: Globe2 },
 ];
 
 const inputCls =
@@ -1688,6 +1691,8 @@ export function AdminDashboard() {
           ))}
         </CardGrid>
       )}
+
+      {activeView === "website" && <WebsiteCMS />}
 
       {activeView === "users" && (
         <div className="surface overflow-hidden shadow-soft">
